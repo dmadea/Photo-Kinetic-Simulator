@@ -204,6 +204,20 @@ class PhotoKineticSymbolicModel:
         latex_eq = r'\begin{align}' + latex_eq + r'\end{align}'
         display(Math(latex_eq))
 
+    def pprint_model_no_env(self):
+        """Pretty prints model. Will work only in Jupyter notebook or QtConsole environment.
+        No environment is used here."""
+
+        for el in self.elem_reactions:
+            reactants = ' + '.join([f'\\mathrm{{{comp}}}' for comp in el['from_comp']])
+            products = ' + '.join([f'\\mathrm{{{comp}}}' for comp in el['to_comp']])
+
+            r_name = el['rate_constant_name']
+
+            latex_eq = f'{reactants} \\xrightarrow{{{r_name}}} {products}'
+
+            display(Math(latex_eq))
+
     def pprint_equations(self, subs: List[tuple] = None):
         """Pretty prints the equations. Will work only in Jupyter notebook or QtConsole environment."""
 
@@ -337,7 +351,7 @@ class PhotoKineticSymbolicModel:
         for el in self.elem_reactions:
             rate = el['rate_constant_name']# if el['type'] == 'reaction' else None
             print(f"{el['type'].capitalize()}: {' + '.join(el['from_comp'])} \u2192 {' + '.join(el['to_comp'])}, "
-                  f"{rate=}")
+                  f"rate: {rate}")  # {rate=} does not work in python 3.7 on colab
 
 
 if __name__ == '__main__':

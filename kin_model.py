@@ -1,13 +1,22 @@
 
 from sympy import Function, solve, Eq, factor, simplify, Symbol, symbols
 from IPython.display import display, Math
-from typing import List, Union, Tuple
 import re
+
+import matplotlib.pyplot as plt
+
+from typing import List, Union, Tuple
 
 # import numpy as np
 # import matplotlib.pyplot as plt
 # import json
 # from scipy.integrate import odeint
+
+try:
+    import google.colab
+    IN_COLAB = True
+except ImportError:
+    IN_COLAB = False
 
 
 # inspiration from https://stackoverflow.com/questions/4998629/split-string-with-multiple-delimiters-in-python
@@ -188,8 +197,15 @@ class PhotoKineticSymbolicModel:
 
         self.elem_reactions.append(el)
 
-    def pprint_model(self):
-        """Pretty prints model. Will work only in Jupyter notebook or QtConsole environment."""
+    def print_model(self):
+        if IN_COLAB:
+            self.pprint_model_no_env()
+        else:
+            self.pprint_model_jupyter()
+
+    def pprint_model_jupyter(self):
+        """Pretty prints model. Will work only in Jupyter notebook or QtConsole environment.
+        This uses the align latex environment."""
 
         latex_eq = ''
 

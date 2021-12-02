@@ -1,9 +1,11 @@
 
-from sympy import Function, solve, Eq, factor, simplify, Symbol, symbols
+from sympy import Function, functions, solve, Eq, factor, simplify, Symbol, symbols, lambdify
 from IPython.display import display, Math
 import re
 
 import matplotlib.pyplot as plt
+import numpy as np
+from scipy.integrate import odeint
 
 from typing import List, Union, Tuple
 
@@ -60,13 +62,15 @@ class PhotoKineticSymbolicModel:
         # self.initial_conditions = {}
         self.elem_reactions = []  # list of dictionaries of elementary reactions
         self.scheme = ""
-        self.last_SS_solution = []
+        self.last_SS_solution = dict(diff_eqs={}, SS_eqs={})  # contains dictionaries
 
         self.symbols = dict(compartments=[],
                             equations=[],
                             rate_constants=[],
                             time=None,
-                            flux=None)
+                            flux=None, 
+                            l=None,
+                            epsilon=None)
 
     @classmethod
     def from_text(cls, scheme: str):
@@ -120,7 +124,7 @@ class PhotoKineticSymbolicModel:
             sp_rates = None
             if len(rates) > 0:
                 # delimiter for separating rate constants is semicolon ;
-                sp_rates = list(map(lambda r: r.strip(), filter(None, rates[0].split(';'))))
+                sp_rates = list(map(str.strip, filter(None, rates[0].split(';'))))
 
             tokens = []
 
@@ -271,22 +275,26 @@ class PhotoKineticSymbolicModel:
         if self.symbols['equations'] is None:
             return
 
-        self.last_SS_solution.clear()
+        self.last_SS_solution['diff_eqs'].clear()
+        self.last_SS_solution['SS_eqs'].clear()
 
-        eq2solve = []
+        eq2solve = []   
         variables = []
 
-        for comp, eq, f in zip(self.get_compartments(), self.symbols['equations'], self.symbols['compartments']):
-            if comp in compartments:
+        text_compartments = self.get_compartments()
+
+        for comp, eq, f in zip(text_compartments, self.symbols['equations'], self.symbols['compartments']):
+            if comp in compartments:  # use SS approximation
                 eq2solve.append(Eq(eq.rhs, 0))
                 variables.append(f)
-            else:
-                eq2solve.append(eq)
+            else:  # keep the diff equation
+                eq2solve.append(eq) 
                 variables.append(f.diff(self.symbols['time']))
 
         solution = solve(eq2solve, variables)
 
-        for var, expression in solution.items():
+        # the order of solutions is the same as the input
+        for comp, (var, expression) in zip(text_compartments, solution.items()):
             eq = Eq(var, expression)
             eq = factor(simplify(eq))
 
@@ -294,7 +302,11 @@ class PhotoKineticSymbolicModel:
                 for old, new in subs:
                     eq = eq.subs(old, new)
 
-            self.last_SS_solution.append(eq)
+            if comp in compartments:
+                self.last_SS_solution['SS_eqs'][comp] = eq
+            else:
+                self.last_SS_solution['diff_eqs'][comp] = eq
+
             display(eq)
 
     def clear_model(self):
@@ -303,6 +315,9 @@ class PhotoKineticSymbolicModel:
         self.symbols['rate_constants'].clear()
         self.symbols['time'] = None
         self.symbols['flux'] = None
+        self.symbols['l'] = None
+        self.symbols['epsilon'] = None
+
 
     def build_equations(self):
         """Builds the equations. Converts the elementary reactions reperezentation to sympy differential equations."""
@@ -316,6 +331,7 @@ class PhotoKineticSymbolicModel:
 
         # time and concentrations of absorbed photons J
         self.symbols['time'], self.symbols['flux'] = symbols('t J')
+        self.symbols['l'], self.symbols['epsilon'] = symbols('l epsilon')
 
         for c in comps:
             # f = Function(f'[{{{c}}}]')(s_t)
@@ -326,7 +342,7 @@ class PhotoKineticSymbolicModel:
         inv_idx = dict(zip(idx_dict.values(), idx_dict.keys()))
 
         r_names = list(map(lambda el: el['rate_constant_name'], filter(lambda el: el['type'] == 'reaction', self.elem_reactions)))
-        self.symbols['rate_constants'] = list(map(lambda n: Symbol(n), r_names))
+        self.symbols['rate_constants'] = list(map(Symbol, r_names))
 
         # symbolic rate constants dictionary
         s_rates_dict = dict(zip(r_names, self.symbols['rate_constants']))
@@ -336,11 +352,15 @@ class PhotoKineticSymbolicModel:
             i_to = list(map(lambda com: inv_idx[com], el['to_comp']))  # list of indexes of reaction products
 
             if el['type'] == 'absorption':
-                for k in i_from:
-                    sym_rhss[k] -= self.symbols['flux']
 
-                for k in i_to:
-                    sym_rhss[k] += self.symbols['flux']
+                k = i_from[0]  # absorption for more compartments does not make sense
+                # 1 - 10 ** (-l * eps * c)
+                fraction_abs = 1 - 10 ** (-self.symbols['l'] * self.symbols['epsilon'] * self.symbols['compartments'][k])
+
+                sym_rhss[k] -= self.symbols['flux'] * fraction_abs
+
+                k = i_to[0]
+                sym_rhss[k] += self.symbols['flux'] * fraction_abs
 
                 continue
 
@@ -359,6 +379,72 @@ class PhotoKineticSymbolicModel:
             # construct differential equation
             _eq = Eq(f.diff(self.symbols['time']), rhs)
             self.symbols['equations'].append(_eq)
+
+    def simulate_model(self, rate_constants: Union[List[float], Tuple[float], np.ndarray],
+                       initial_concentrations: Union[List[float], Tuple[float], np.ndarray],
+                       constant_compartments=Union[None, List[str], Tuple[str]],
+                       t_max=1000, flux=1e-8, l=1, epsilon=1e5, t_points=1000, use_SS_approx: bool = True,
+                       yscale='linear'):
+
+        """
+            constant_compartments,  if specified, the concetration of those will be constant and value from 
+            initial concentration will be used
+            if use_SS_approx is True, 
+        """
+        
+        if len(self.symbols['equations']) == 0:
+            raise ValueError("No model instantiated.")
+
+        comps = self.get_compartments()
+        n = len(comps)
+        use_SS_approx = use_SS_approx and len(self.last_SS_solution['SS_eqs'].values()) > 0
+
+        symbols = self.symbols['rate_constants'] + self.symbols['compartments'] + [self.symbols['flux'], self.symbols['l'], self.symbols['epsilon']]
+
+        sym_funcs = list(self.last_SS_solution['diff_eqs'].values()) if use_SS_approx else self.symbols['equations']
+
+        d_funcs = list(map(lambda eq: lambdify(symbols, eq.rhs, 'numpy'), sym_funcs))
+
+        times = np.linspace(0, t_max, t_points)
+
+        init_c = np.asarray(initial_concentrations)
+        if use_SS_approx:
+            idxs = list(map(comps.index, self.last_SS_solution['diff_eqs'].keys()))
+            init_c = init_c[idxs]  # pick initial conditions only for those species who will be calculated by diff. eq.
+
+        def dc_dt(c, t):
+            if use_SS_approx:
+                _c = np.zeros(n)  # need to cast the concentations to have the original size of the compartments
+                _c[idxs] = c
+            else:
+                _c = c
+
+            return [f(*rate_constants, *_c, flux, l, epsilon) for f in d_funcs]
+
+        C = odeint(dc_dt, init_c, times)
+
+        if use_SS_approx:
+            tr_dict = dict(zip(comps, [None] * n))
+
+            for comp, trace in zip(self.last_SS_solution['diff_eqs'].keys(), C.T):
+                tr_dict[comp] = trace
+
+            # calculate the SS concentrations from the solution of diff. eq.
+            for comp, eq in self.last_SS_solution['SS_eqs'].items():
+                f = lambdify(symbols, eq.rhs, 'numpy')
+                tr_dict[comp] = f(*rate_constants, *tr_dict.values(), flux, l, epsilon)
+        else:
+            tr_dict = dict(zip(comps, C.T))
+
+
+        for label, trace in tr_dict.items():
+            plt.plot(times, trace, label=label)
+
+        plt.xlabel('Time')
+        plt.ylabel('Concentration')
+        plt.yscale(yscale)
+        plt.legend(frameon=False)
+        plt.show()
 
     def print_text_model(self):
         """Print the model as text."""
@@ -393,19 +479,26 @@ if __name__ == '__main__':
     D --> 
 
     """
+    model = """
+    A -hv-> ^1A --> A           // k_d  # absorption and singlet state decay
+    ^1A -->  // k_r
 
-    str_model = """
-    ArO_2 --> Ar + ^1O_2             // k_1  # absorption and singlet state decay
-    ^1O_2 --> ^3O_2                  // k_d
-    #  ^1O_2 + Ar --> Ar + ^3O_2         // k_{q,Ar}
-    #  ^1O_2 + ArO_2 --> ArO_2 + ^3O_2     // k_{q,ArO_2}
-    ^1O_2 + S --> S + ^3O_2           // k_{q,S}
-    S + ^1O_2 -->                      // k_r
     """
 
-    model = PhotoKineticSymbolicModel.from_text(str_model)
+    # str_model = """
+    # ArO_2 --> Ar + ^1O_2             // k_1  # absorption and singlet state decay
+    # ^1O_2 --> ^3O_2                  // k_d
+    # #  ^1O_2 + Ar --> Ar + ^3O_2         // k_{q,Ar}
+    # #  ^1O_2 + ArO_2 --> ArO_2 + ^3O_2     // k_{q,ArO_2}
+    # ^1O_2 + S --> S + ^3O_2           // k_{q,S}
+    # S + ^1O_2 -->                      // k_r
+    # """
+
+    model = PhotoKineticSymbolicModel.from_text(model)
     print(model.print_text_model())
 
+    model.steady_state_approx(['^1A'])
+    model.simulate_model([1e9, 1e9], [1, 0], t_max=25, flux=1, yscale='linear', epsilon=1)
 
 
 

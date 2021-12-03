@@ -5,7 +5,7 @@ import re
 
 import matplotlib.pyplot as plt
 import numpy as np
-from scipy.integrate import odeint
+from scipy.integrate import odeint, solve_ivp
 
 from typing import List, Union, Tuple
 
@@ -272,7 +272,7 @@ class PhotoKineticSymbolicModel:
         return names
 
     def steady_state_approx(self, compartments: Union[List[str], Tuple[str]],
-                            subs: List[tuple] = None):
+                            subs: List[tuple] = None, print_solution=True):
         """Performs the steady state approximation for the given species and displays the 
         result."""
 
@@ -313,8 +313,8 @@ class PhotoKineticSymbolicModel:
                 self.last_SS_solution['SS_eqs'][comp] = eq
             else:
                 self.last_SS_solution['diff_eqs'][comp] = eq
-
-            display(eq)
+            if print_solution:
+                display(eq)
 
     def clear_model(self):
         self.symbols['compartments'].clear()
@@ -398,14 +398,18 @@ class PhotoKineticSymbolicModel:
 
     def simulate_model(self, rate_constants: Union[List[float], Tuple[float], np.ndarray],
                        initial_concentrations: Union[List[float], Tuple[float], np.ndarray],
-                       constant_compartments=Union[None, List[str], Tuple[str]],
+                       constant_compartments: Union[None, List[str], Tuple[str]] = None, 
                        t_max=1000, flux=1e-8, l=1, epsilon=1e5, t_points=1000, use_SS_approx: bool = True,
                        yscale='linear', scale=True, figsize=(8, 6)):
 
         """
             constant_compartments,  if specified, the concetration of those will be constant and value from 
-            initial concentration will be used
+            initial concentration will be used, this will have only effect on those compartments, which are 
+            numerically simulated
+
             if use_SS_approx is True, 
+
+            ode_solver, default Radau method, will work also on non-SS differential equations
         """
         
         if len(self.symbols['equations']) == 0:
@@ -425,6 +429,7 @@ class PhotoKineticSymbolicModel:
 
         # scale rate constants, flux, epsilon and initial_concentrations for less numerial errors in
         # the numerical integration
+        coef = 1
         if scale:
             coef = init_c[init_c > 0].min()  # scaling coefficient, lets choose the minimal concentration given
             init_c /= coef
@@ -432,8 +437,6 @@ class PhotoKineticSymbolicModel:
             flux /= coef
             # second and higher orders needs to be appropriately scaled, by coef ^ (rate order - 1)
             rates *= coef ** (np.asarray(self._rate_constant_orders, dtype=np.float64) - 1)
-        else:
-            coef = 1
 
         symbols = self.symbols['rate_constants'] + self.symbols['compartments'] + [self.symbols['flux'], self.symbols['l'], self.symbols['epsilon']]
 
@@ -442,26 +445,36 @@ class PhotoKineticSymbolicModel:
         d_funcs = list(map(lambda eq: lambdify(symbols, eq.rhs, 'numpy'), sym_eqs))
 
         # those compartments that will be simulated numerically
-        idxs = np.asarray(tuple(map(comps.index, self.last_SS_solution['diff_eqs'].keys())), dtype=int) if use_SS_approx else np.arange(n, dtype=int)
+        idxs2simulate = list(map(comps.index, self.last_SS_solution['diff_eqs'].keys())) if use_SS_approx else list(np.arange(n, dtype=int))
 
-        init_c = init_c[idxs]  # pick initial conditions only for those species that will be calculated by diff. eq.
+        # idxs_constant = []  # empty list
+        idxs_constant_cast = []
+        if constant_compartments is not None:
+            idxs_constant = map(comps.index, filter(lambda c: c in comps, constant_compartments))
+            idxs_constant_cast = list(map(idxs2simulate.index, filter(lambda c: c in idxs2simulate, idxs_constant)))
 
-        def dc_dt(c, t):
+        def dc_dt(t, c):
             _c = np.empty(n)  # need to cast the concentations to have the original size of the compartments
-            _c[idxs] = c
-            return [f(*rates, *_c, flux, l, epsilon) for f in d_funcs]
+            _c[idxs2simulate] = c
 
-        C = np.empty((times.shape[0], n))
+            solution = np.asarray([f(*rates, *_c, flux, l, epsilon) for f in d_funcs])
+            solution[idxs_constant_cast] = 0  # set the change of constant compartments to zero
+
+            return solution
     
         # numerically integrate
-        C[:, idxs] = odeint(dc_dt, init_c, times)
+        # https://docs.scipy.org/doc/scipy/reference/generated/scipy.integrate.solve_ivp.html#scipy.integrate.solve_ivp
+        sol = solve_ivp(dc_dt, (0, t_max), init_c[idxs2simulate], method='Radau', vectorized=False, dense_output=True)
+
+        C = np.empty((n, times.shape[0]))
+        C[idxs2simulate, :] = sol.sol(times)  # evaluate at dense time points
 
         # calculate the SS concentrations from the solution of diff. eq.
         if use_SS_approx:
             for comp, eq in self.last_SS_solution['SS_eqs'].items():
                 i = comps.index(comp)
                 f = lambdify(symbols, eq.rhs, 'numpy')
-                C[:, i] = f(*rates, *list(C.T), flux, l, epsilon)
+                C[i, :] = f(*rates, *list(C), flux, l, epsilon)
 
         # scale the traces back to correct values
         C *= coef
@@ -470,7 +483,12 @@ class PhotoKineticSymbolicModel:
         fig, ax = plt.subplots(1, 1, figsize=figsize)
 
         # plot the results
-        for label, trace in zip(comps, self.last_simul_matrix.T):
+        for label, trace in zip(comps, self.last_simul_matrix):
+            # don't plot constant compartments, show only their concetration in label
+            if constant_compartments is not None and label in constant_compartments:
+                i = comps.index(label)
+                ax.plot([], [], label=f'$[\\mathrm{{{label}}}]={init_c[i] * coef:.3g}$ M', lw=2.5)
+                continue
             ax.plot(times, trace, label=f'$\\mathrm{{{label}}}$', lw=2.5)
 
         ax.set_xlabel('Time')
@@ -533,8 +551,9 @@ if __name__ == '__main__':
     # model.simulate_model([1, 10], [0.1, 0], t_max=10, yscale='linear', scale=False)
 
 
-    model.steady_state_approx(['^1O_2'])
-    model.simulate_model([5e-3, 1/9.5e-6, 1e4, 1e9], [1e-3, 0, 0, 0, 1e-3], t_max=1e3, yscale='log', scale=True)
+    model.steady_state_approx(['^1O_2'], print_solution=False)
+    model.simulate_model([5e-3, 1/9.5e-6, 1e4, 1e9], [1e-3, 0, 0, 95, 1e-3],
+                        constant_compartments=['^3O_2'], t_max=1e3, yscale='linear', scale=False)
 
 
 

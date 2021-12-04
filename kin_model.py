@@ -9,6 +9,9 @@ from scipy.integrate import odeint, solve_ivp
 
 from typing import List, Union, Tuple
 
+
+COLORS = ['blue', 'red', 'green', 'orange', 'black', 'yellow']
+
 plt.rcParams.update({'font.size': 14})
 plt.rcParams.update({'xtick.major.size': 5, 'ytick.major.size': 5})
 plt.rcParams.update({'xtick.minor.size': 2.5, 'ytick.minor.size': 2.5})
@@ -400,7 +403,7 @@ class PhotoKineticSymbolicModel:
                        initial_concentrations: Union[List[float], Tuple[float], np.ndarray],
                        constant_compartments: Union[None, List[str], Tuple[str]] = None, 
                        t_max=1000, flux=1e-8, l=1, epsilon=1e5, t_points=1000, use_SS_approx: bool = True,
-                       yscale='linear', scale=True, figsize=(8, 6)):
+                       yscale='linear', plot_separately: bool = True, scale=True, figsize=(8, 6)):
 
         """
             constant_compartments,  if specified, the concetration of those will be constant and value from 
@@ -447,7 +450,7 @@ class PhotoKineticSymbolicModel:
         # those compartments that will be simulated numerically
         idxs2simulate = list(map(comps.index, self.last_SS_solution['diff_eqs'].keys())) if use_SS_approx else list(np.arange(n, dtype=int))
 
-        # idxs_constant = []  # empty list
+        idxs_constant = []  # empty list
         idxs_constant_cast = []
         if constant_compartments is not None:
             idxs_constant = map(comps.index, filter(lambda c: c in comps, constant_compartments))
@@ -480,22 +483,46 @@ class PhotoKineticSymbolicModel:
         C *= coef
         self.last_simul_matrix = C
 
-        fig, ax = plt.subplots(1, 1, figsize=figsize)
+        n_rows = n - len(idxs_constant_cast) if plot_separately else 1
+        figsize = (figsize[0] , figsize[1] * n_rows / 2) if plot_separately else figsize
+        fig, axes = plt.subplots(n_rows, 1, figsize=figsize, sharex=plot_separately)
+
+        # create indexes of only those comps. which will be plotted, so remove all constant comps.
+        idxs2plot = set(np.arange(n, dtype=int)) - set(np.asarray(idxs2simulate)[idxs_constant_cast])
+
+        comps_cast = [comps[i] for i in idxs2plot]
+        traces_cast = [self.last_simul_matrix[i, :] for i in idxs2plot]
 
         # plot the results
-        for label, trace in zip(comps, self.last_simul_matrix):
-            # don't plot constant compartments, show only their concetration in label
-            if constant_compartments is not None and label in constant_compartments:
-                i = comps.index(label)
-                ax.plot([], [], label=f'$[\\mathrm{{{label}}}]={init_c[i] * coef:.3g}$ M', lw=2.5)
-                continue
-            ax.plot(times, trace, label=f'$\\mathrm{{{label}}}$', lw=2.5)
+        if plot_separately:
+            for i, (label, trace, ax) in enumerate(zip(comps_cast, traces_cast, axes)):
+                color = COLORS[i % len(COLORS)]
 
-        ax.set_xlabel('Time')
-        ax.set_ylabel('Concentration')
-        ax.set_yscale(yscale)
-        ax.legend(frameon=False)
+                ax.plot(times, trace, label=f'$\\mathrm{{{label}}}$', lw=2.5, color=color)
+                ax.set_ylabel('Concentration')
+                ax.legend(frameon=False)
+                ax.set_yscale(yscale)
+
+            axes[-1].set_xlabel('Time')
+        else:
+            ax = axes
+            for i, (label, trace) in enumerate(zip(comps_cast, traces_cast)):
+                color = COLORS[i % len(COLORS)]
+
+                # don't plot constant compartments, show only their concetration in label
+                # if constant_compartments is not None and label in constant_compartments:
+                    # i = comps.index(label)
+                    # ax.plot([], [], label=f'$[\\mathrm{{{label}}}]={init_c[i] * coef:.3g}$ M', lw=2.5, color=color)
+                    # continue
+
+                ax.plot(times, trace, label=f'$\\mathrm{{{label}}}$', lw=2.5, color=color)
+
+            ax.set_xlabel('Time')
+            ax.set_ylabel('Concentration')
+            ax.set_yscale(yscale)
+            ax.legend(frameon=False)
         
+        plt.tight_layout()
         plt.show()
 
     def print_text_model(self):
@@ -533,7 +560,7 @@ if __name__ == '__main__':
     # A -hv-> ^1A --> A           // k_d  # absorption and singlet state decay
     # ^1A -->  // k_r
 
-    # """
+    # """git
 
     model = """
     ArO_2 --> Ar + ^1O_2             // k_1  # absorption and singlet state decay
@@ -553,7 +580,8 @@ if __name__ == '__main__':
 
     model.steady_state_approx(['^1O_2'], print_solution=False)
     model.simulate_model([5e-3, 1/9.5e-6, 1e4, 1e9], [1e-3, 0, 0, 95, 1e-3],
-                        constant_compartments=['^3O_2'], t_max=1e3, yscale='linear', scale=False)
+                        constant_compartments=['^3O_2'], t_max=1e3, yscale='linear', scale=False,
+                        plot_separately=True)
 
 
 

@@ -10,9 +10,6 @@ from scipy.integrate import odeint, solve_ivp
 
 from typing import List, Union, Tuple
 
-from sympy.matrices.matrices import num_mat_mul
-
-
 COLORS = ['blue', 'red', 'green', 'orange', 'black', 'yellow']
 
 plt.rcParams.update({'font.size': 14})
@@ -551,9 +548,6 @@ class PhotoKineticSymbolicModel:
 
         comps_cast = [comps[i] for i in idxs2plot]
         traces_cast = [self.last_simul_matrix[:, i, :] for i in idxs2plot]
-
-        # scale rates and init_c back
-
 
         # find what rate constants or initial concentrations are changing
         par_names = []

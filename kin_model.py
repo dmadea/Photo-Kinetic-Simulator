@@ -4,10 +4,13 @@ from IPython.display import display, Math
 import re
 
 import matplotlib.pyplot as plt
+from matplotlib import cm
 import numpy as np
 from scipy.integrate import odeint, solve_ivp
 
 from typing import List, Union, Tuple
+
+from sympy.matrices.matrices import num_mat_mul
 
 
 COLORS = ['blue', 'red', 'green', 'orange', 'black', 'yellow']
@@ -47,6 +50,34 @@ def split_delimiters(text: str, delimiters: Union[list, tuple]) -> List[tuple]:
         delimiters.append('')  # append '' as a delimiter if text did not end with delimiter
 
     return list(zip(entries, delimiters))
+
+
+def get_matrix(parameters: Union[list, tuple, np.ndarray], n_params: int) -> tuple:
+    """
+    
+    
+    returns parameter matrix and the idxes of parameters that are iterable
+    """
+    is_iterable = list(map(np.iterable, parameters))
+    #  check whether the length of arrays within the array is the same
+    last_length = None
+    arr_idxs = list(filter(lambda idx: is_iterable[idx], range(n_params)))
+    for i in arr_idxs:
+        new_length = len(parameters[i])
+        if last_length is not None and last_length != new_length:
+            raise ValueError("Array lengths in parameters array does not match.")
+            # assert last_length == new_length, "Array lengths in rate_constants array does not match."
+        last_length = new_length
+
+    if last_length is None:
+        last_length = 1
+    param_matrix = np.empty((last_length, n_params), dtype=np.float64)
+
+    # fill the values into the rates matrix
+    for i in range(n_params):
+        param_matrix[:, i] = np.asarray(parameters[i]) if i in arr_idxs else parameters[i]
+
+    return param_matrix, arr_idxs
 
 
 class PhotoKineticSymbolicModel:
@@ -399,11 +430,12 @@ class PhotoKineticSymbolicModel:
             _eq = Eq(f.diff(self.symbols['time']), rhs)
             self.symbols['equations'].append(_eq)
 
-    def simulate_model(self, rate_constants: Union[List[float], Tuple[float], np.ndarray],
-                       initial_concentrations: Union[List[float], Tuple[float], np.ndarray],
+    def simulate_model(self, rate_constants: Union[List, Tuple, np.ndarray],
+                       initial_concentrations: Union[List, Tuple, np.ndarray],
                        constant_compartments: Union[None, List[str], Tuple[str]] = None, 
                        t_max=1000, flux=1e-8, l=1, epsilon=1e5, t_points=1000, use_SS_approx: bool = True,
-                       yscale='linear', plot_separately: bool = True, scale=True, figsize=(8, 6)):
+                       yscale='linear', plot_separately: bool = True, scale=True, figsize=(6, 4),
+                       cmap='jet', lw=2, legend_fontsize=12):
 
         """
             constant_compartments,  if specified, the concetration of those will be constant and value from 
@@ -413,6 +445,12 @@ class PhotoKineticSymbolicModel:
             if use_SS_approx is True, 
 
             ode_solver, default Radau method, will work also on non-SS differential equations
+
+            rate_constants and intial_concentrations can be a list of floats in a correct order, or it can 
+            also contain list in which the simulation will performed as many times as is the length of the list
+
+            it can be [1, 0, 1e9, [1, 5, 9], [5, 8, 4]]
+
         """
         
         if len(self.symbols['equations']) == 0:
@@ -421,11 +459,27 @@ class PhotoKineticSymbolicModel:
         comps = self.get_compartments()
         n = len(comps)
         use_SS_approx = use_SS_approx and len(self.last_SS_solution['SS_eqs'].values()) > 0
-        init_c = np.asarray(initial_concentrations, dtype=np.float64)
-        rates = np.asarray(rate_constants, dtype=np.float64)
 
-        assert init_c.shape[0] == n
-        assert rates.shape[0] == len(self.symbols['rate_constants'])
+        # find the number of arrays in the rate_constant array
+        n_rates = len(self.symbols['rate_constants'])
+
+        assert len(initial_concentrations) == n, "Length of initial_concentrations must match the number of compartments."
+        assert len(rate_constants) == n_rates, "Length of rate_constants must match the number of rate constants."
+
+        # shape of matrices are k x n where k is number of parameters within the array to simulate
+        rates, idx_iter_rates = get_matrix(rate_constants, n_rates)
+        init_c, idx_iter_init_c = get_matrix(initial_concentrations, n)
+
+        k = max(rates.shape[0], init_c.shape[0])  # number of inner parameters in a both parameter arrays
+
+        # if k != rates.shape[0] or k != init_c.shape[0]:
+        #     raise ValueError("Number of inner parameters in rate_constant and initial_concentrations arrays does not match.")
+        
+        # tile the other array so the first dimension of both arrays is k
+        if rates.shape[0] < init_c.shape[0]:
+            rates = np.tile(rates[0], (k, 1))
+        elif init_c.shape[0] < rates.shape[0]:
+            init_c = np.tile(init_c[0], (k, 1))
 
         self.last_simul_matrix = None
         times = np.linspace(0, t_max, int(t_points))
@@ -433,13 +487,15 @@ class PhotoKineticSymbolicModel:
         # scale rate constants, flux, epsilon and initial_concentrations for less numerial errors in
         # the numerical integration
         coef = 1
+        init_c_sc = init_c.copy()
+        rates_sc = rates.copy()
         if scale:
             coef = init_c[init_c > 0].min()  # scaling coefficient, lets choose the minimal concentration given
-            init_c /= coef
+            init_c_sc /= coef
             epsilon *= coef
             flux /= coef
             # second and higher orders needs to be appropriately scaled, by coef ^ (rate order - 1)
-            rates *= coef ** (np.asarray(self._rate_constant_orders, dtype=np.float64) - 1)
+            rates_sc *= coef ** (np.asarray(self._rate_constant_orders, dtype=np.float64) - 1)
 
         symbols = self.symbols['rate_constants'] + self.symbols['compartments'] + [self.symbols['flux'], self.symbols['l'], self.symbols['epsilon']]
 
@@ -456,7 +512,7 @@ class PhotoKineticSymbolicModel:
             idxs_constant = map(comps.index, filter(lambda c: c in comps, constant_compartments))
             idxs_constant_cast = list(map(idxs2simulate.index, filter(lambda c: c in idxs2simulate, idxs_constant)))
 
-        def dc_dt(t, c):
+        def dc_dt(t, c, rates, flux, l, epsilon):
             _c = np.empty(n)  # need to cast the concentations to have the original size of the compartments
             _c[idxs2simulate] = c
 
@@ -464,66 +520,106 @@ class PhotoKineticSymbolicModel:
             solution[idxs_constant_cast] = 0  # set the change of constant compartments to zero
 
             return solution
-    
-        # numerically integrate
-        # https://docs.scipy.org/doc/scipy/reference/generated/scipy.integrate.solve_ivp.html#scipy.integrate.solve_ivp
-        sol = solve_ivp(dc_dt, (0, t_max), init_c[idxs2simulate], method='Radau', vectorized=False, dense_output=True)
 
-        C = np.empty((n, times.shape[0]))
-        C[idxs2simulate, :] = sol.sol(times)  # evaluate at dense time points
+        C = np.empty((k, n, times.shape[0]))
 
-        # calculate the SS concentrations from the solution of diff. eq.
-        if use_SS_approx:
-            for comp, eq in self.last_SS_solution['SS_eqs'].items():
-                i = comps.index(comp)
-                f = lambdify(symbols, eq.rhs, 'numpy')
-                C[i, :] = f(*rates, *list(C), flux, l, epsilon)
+        for i in range(k):
+            # numerically integrate
+            # https://docs.scipy.org/doc/scipy/reference/generated/scipy.integrate.solve_ivp.html#scipy.integrate.solve_ivp
+            sol = solve_ivp(dc_dt, (0, t_max), init_c_sc[i, idxs2simulate], method='Radau', vectorized=False, dense_output=True,
+                    args=(rates_sc[i, :], flux, l, epsilon))
+
+            C[i, idxs2simulate, :] = sol.sol(times)  # evaluate at dense time points
+
+            # calculate the SS concentrations from the solution of diff. eq.
+            if use_SS_approx:
+                for comp, eq in self.last_SS_solution['SS_eqs'].items():
+                    j = comps.index(comp)
+                    f = lambdify(symbols, eq.rhs, 'numpy')
+                    C[i, j, :] = f(*rates_sc[i, :], *list(C[i]), flux, l, epsilon)
 
         # scale the traces back to correct values
         C *= coef
         self.last_simul_matrix = C
 
-        n_rows = n - len(idxs_constant_cast) if plot_separately else 1
-        figsize = (figsize[0] , figsize[1] * n_rows / 2) if plot_separately else figsize
-        fig, axes = plt.subplots(n_rows, 1, figsize=figsize, sharex=plot_separately)
+        # n_rows = n - len(idxs_constant_cast) if plot_separately else 1
+        # figsize = (figsize[0] , figsize[1] * n_rows / 2) if plot_separately else figsize
+        # fig, axes = plt.subplots(n_rows, 1, figsize=figsize, sharex=plot_separately)
 
         # create indexes of only those comps. which will be plotted, so remove all constant comps.
         idxs2plot = set(np.arange(n, dtype=int)) - set(np.asarray(idxs2simulate)[idxs_constant_cast])
 
         comps_cast = [comps[i] for i in idxs2plot]
-        traces_cast = [self.last_simul_matrix[i, :] for i in idxs2plot]
+        traces_cast = [self.last_simul_matrix[:, i, :] for i in idxs2plot]
 
+        # scale rates and init_c back
+
+
+        # find what rate constants or initial concentrations are changing
+        par_names = []
+        for i in range(k):
+            # https://docs.python.org/3/library/string.html#format-string-syntax
+            # # option does not remove the trailing zeros from the output
+            text_rates = ', '.join([f"{self.symbols['rate_constants'][j]}={rates[i, j]:#.3g}" for j in idx_iter_rates])
+            text_init = ', '.join([f"[\\mathrm{{{comps[j]}}}]_0={init_c[i, j]:#.3g}" for j in idx_iter_init_c])
+
+            # combine texts and remove empty entries (in case the the texts are empty)
+            par_names.append('; '.join(filter(None, [text_rates, text_init])))
+            
         # plot the results
         if plot_separately:
-            for i, (label, trace, ax) in enumerate(zip(comps_cast, traces_cast, axes)):
-                color = COLORS[i % len(COLORS)]
+            n_rows = n - len(idxs_constant_cast)
+            figsize = (figsize[0] , figsize[1] * n_rows / 2)
+            fig, axes = plt.subplots(n_rows, 1, figsize=figsize, sharex=True)
 
-                ax.plot(times, trace, label=f'$\\mathrm{{{label}}}$', lw=2.5, color=color)
+            # colormap for inner parameters
+            cmap = cm.get_cmap(cmap)
+            for i, (comp, trace, ax) in enumerate(zip(comps_cast, traces_cast, axes)):
+                for j in range(k):
+                    label = '' if par_names[j] == '' else f'${par_names[j]}$'
+                    ax.plot(times, trace[j], label=label if i == 0 else '', lw=lw, color=cmap(j/trace.shape[0]))
                 ax.set_ylabel('Concentration')
-                ax.legend(frameon=False)
+                if i == 0:
+                    ax.legend(frameon=False, fontsize=legend_fontsize)
                 ax.set_yscale(yscale)
-
+                ax.set_title(f'$\\mathrm{{{comp}}}$')
+                ax.tick_params(axis='both', which='major', direction='in')
+                ax.tick_params(axis='both', which='minor', direction='in')
+                ax.xaxis.set_ticks_position('both')
+                ax.yaxis.set_ticks_position('both')
             axes[-1].set_xlabel('Time')
+
         else:
-            ax = axes
-            for i, (label, trace) in enumerate(zip(comps_cast, traces_cast)):
-                color = COLORS[i % len(COLORS)]
+            figsize = (figsize[0] , figsize[1] * k)
+            fig, axes = plt.subplots(k, 1, figsize=figsize, sharex=True)
 
-                # don't plot constant compartments, show only their concetration in label
-                # if constant_compartments is not None and label in constant_compartments:
-                    # i = comps.index(label)
-                    # ax.plot([], [], label=f'$[\\mathrm{{{label}}}]={init_c[i] * coef:.3g}$ M', lw=2.5, color=color)
-                    # continue
+            for i in range(k):
+                ax = axes[i] if k > 1 else axes
 
-                ax.plot(times, trace, label=f'$\\mathrm{{{label}}}$', lw=2.5, color=color)
+                for j, (comp, trace) in enumerate(zip(comps_cast, traces_cast)):
+                    color = COLORS[j % len(COLORS)]
+                    ax.plot(times, trace[i], label=f'$\\mathrm{{{comp}}}$', lw=lw, color=color)
 
-            ax.set_xlabel('Time')
-            ax.set_ylabel('Concentration')
-            ax.set_yscale(yscale)
-            ax.legend(frameon=False)
-        
+                if i == k - 1:
+                    ax.set_xlabel('Time')
+                ax.set_ylabel('Concentration')
+                title = '' if par_names[i] == '' else f'${par_names[i]}$'
+                ax.set_title(title)
+                ax.set_yscale(yscale)
+                ax.tick_params(axis='both', which='major', direction='in')
+                ax.tick_params(axis='both', which='minor', direction='in')
+                ax.xaxis.set_ticks_position('both')
+                ax.yaxis.set_ticks_position('both')
+                ax.legend(frameon=False, fontsize=legend_fontsize)
+            
         plt.tight_layout()
         plt.show()
+
+                    # don't plot constant compartments, show only their concetration in label
+                    # if constant_compartments is not None and label in constant_compartments:
+                        # i = comps.index(label)
+                        # ax.plot([], [], label=f'$[\\mathrm{{{label}}}]={init_c[i] * coef:.3g}$ M', lw=2.5, color=color)
+                        # continue
 
     def print_text_model(self):
         """Print the model as text."""
@@ -579,9 +675,9 @@ if __name__ == '__main__':
 
 
     model.steady_state_approx(['^1O_2'], print_solution=False)
-    model.simulate_model([5e-3, 1/9.5e-6, 1e4, 1e9], [1e-3, 0, 0, 95, 1e-3],
+    model.simulate_model([1e-3, 1/9.5e-6, 1e4, 1e9], [np.linspace(1e-3, 1e-2, 3), 0, 0, 95, 1e-3],
                         constant_compartments=['^3O_2'], t_max=1e3, yscale='linear', scale=False,
-                        plot_separately=True)
+                        plot_separately=False)
 
 
 

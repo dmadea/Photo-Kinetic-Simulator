@@ -13,12 +13,6 @@ from typing import List, Union, Tuple
 
 COLORS = ['blue', 'red', 'green', 'orange', 'black', 'yellow']
 
-plt.rcParams.update({'font.size': 14})
-plt.rcParams.update({'xtick.major.size': 5, 'ytick.major.size': 5})
-plt.rcParams.update({'xtick.minor.size': 2.5, 'ytick.minor.size': 2.5})
-plt.rcParams.update({'xtick.major.width': 1, 'ytick.major.width': 1})
-plt.rcParams.update({'xtick.minor.width': 0.8, 'ytick.minor.width': 0.8})
-
 try:
     import google.colab
     IN_COLAB = True
@@ -27,10 +21,19 @@ except ImportError:
 
 
 # inspiration from https://stackoverflow.com/questions/4998629/split-string-with-multiple-delimiters-in-python
-def split_delimiters(text: str, delimiters: Union[list, tuple]) -> List[tuple]:
+def split_delimiters(text: str, delimiters: Union[List[str], Tuple[str]]) -> List[tuple]:
     """
-    Splits the text with denoted delimiters and returns the list of tuples in which
-    first entry is the splitted text and the 2nd is the delimiter.
+    Splits the text with delimiters and returns the list of tuples in which
+    first entry is the splitted text and the second is the corresponding delimiter
+    used. If there is text after last occurence of a delimiter, empty string will
+    be used for last delimiter (second entry of last entry of the list).
+
+    Parameters
+    ----------
+    text : str
+        Input string to separate.
+    delimiters : list or tuple 
+        Delimiters that will be used to split the text.
     """
 
     if not text:
@@ -50,12 +53,27 @@ def split_delimiters(text: str, delimiters: Union[list, tuple]) -> List[tuple]:
     return list(zip(entries, delimiters))
 
 
-def get_matrix(parameters: Union[list, tuple, np.ndarray], n_params: int) -> tuple:
+def get_matrix(parameters: Union[list, tuple, np.ndarray]) -> tuple:
     """
-    
-    
-    returns parameter matrix and the idxes of parameters that are iterable
+    Parsers the input parameters and finds all the iterable entries. If there are
+    multiple iterable entries in the parameters, all have to have the same length 
+    and contain numbers. Function returns the matrix of parameters of shape of 
+    k x n where k is the length of iterable entries and n is the number of parameters.
+    If the paramateres did not contain any iterables, the resulting  shape of a matrix
+    will be 1 x n. Non-iterable entries are repeated in the corresponding columns of a
+    return matrix.
+
+    Parameters
+    ----------
+    parameters : 
+        List/tuple of numbers or other iterables.
+
+    Returns
+    ----------
+    Returns a tuple of resulting matrix and list of indexes of iterables in parameters.
     """
+
+    n_params = len(parameters)
     is_iterable = list(map(np.iterable, parameters))
     #  check whether the length of arrays within the array is the same
     last_length = None
@@ -64,7 +82,6 @@ def get_matrix(parameters: Union[list, tuple, np.ndarray], n_params: int) -> tup
         new_length = len(parameters[i])
         if last_length is not None and last_length != new_length:
             raise ValueError("Array lengths in parameters array does not match.")
-            # assert last_length == new_length, "Array lengths in rate_constants array does not match."
         last_length = new_length
 
     if last_length is None:
@@ -80,10 +97,73 @@ def get_matrix(parameters: Union[list, tuple, np.ndarray], n_params: int) -> tup
 
 class PhotoKineticSymbolicModel:
     """
+    Class representing the Symbolic Model. Can parse the text-based model, display the 
+    model in LaTex and construct the corresponding differential equations. Steady state
+    approximation can be performed for specified compartments. Finally, the model can
+    be simulated and the results plotted.
+
+    Attributes
+    ----------
     
+    elem_reactions: List[dict]
+        List of dictionaries of elementary reactions.
+    scheme: str
+        Text of input scheme.
+    symbols: dict
+        Sympy symbols and equations that represents the model.
+    last_SS_solution: Dict[Dict[dict[str, sympy object]]]
+        Dictionaries containing latest solution of a steady state approximation.
+    C_tensor : np.ndarray
+        The latest result of the simulation. It is in shape of [k, n, t] where
+        k is the number of iterables inside parameters to simulate the model for, 
+        n is the number of compartments, and t is number of time points
     
-    
-    
+    Examples
+    ----------
+    Simple first order sequential model:
+
+    >>> text_model = '''
+    ... A --> B --> C  // k_1 ; k_2
+    ... '''
+    >>> model = PhotoKineticSymbolicModel.from_text(text_model)
+    >>> model.print_model()
+    <IPython.core.display.Math object>
+    >>> model.pprint_equations()
+    Eq(Derivative(c_{A}(t), t), -k_1*c_{A}(t))
+    Eq(Derivative(c_{B}(t), t), k_1*c_{A}(t) - k_2*c_{B}(t))
+    Eq(Derivative(c_{C}(t), t), k_2*c_{B}(t))
+    >>> print(model.symbols['rate_constants'], model.symbols['compartments'])
+    [k_1, k_2] [c_{A}(t), c_{B}(t), c_{C}(t)]
+    >>> model.simulate_model([1, 0.5], [1, 0, 0], t_max=10, plot_separately=False)
+
+    Excitation and then decompositions of the compound from its singlet state.
+    The steady state approximation for the singlet state is performed as the
+    lifetime of the state is very short compared to the measured steady state kinetics.
+
+    >>> text_model = '''
+    ... GS -hv-> ^1S --> GS  // k_s  # absorption to singlet and decay to ground state
+    ... ^1S --> P            // k_r  # formation of product from the singlet state
+    ... '''
+    >>> model = PhotoKineticSymbolicModel.from_text(text_model)
+    >>> model.print_model()
+    <IPython.core.display.Math object>
+    >>> model.pprint_equations()
+    Eq(Derivative(c_{GS}(t), t), -J*(1 - 1/10**(epsilon*l*c_{GS}(t))) + k_s*c_{^1S}(t))
+    Eq(Derivative(c_{^1S}(t), t), J*(1 - 1/10**(epsilon*l*c_{GS}(t))) - k_r*c_{^1S}(t) - k_s*c_{^1S}(t))
+    Eq(Derivative(c_{P}(t), t), k_r*c_{^1S}(t))
+    >>> model.steady_state_approx(['^1S'])
+    Eq(Derivative(c_{GS}(t), t), -J*k_r*(10**(epsilon*l*c_{GS}(t)) - 1)/(10**(epsilon*l*c_{GS}(t))*(k_r + k_s)))
+    Eq(c_{^1S}(t), J*(10**(epsilon*l*c_{GS}(t)) - 1)/(10**(epsilon*l*c_{GS}(t))*(k_r + k_s)))
+    Eq(Derivative(c_{P}(t), t), J*k_r*(10**(epsilon*l*c_{GS}(t)) - 1)/(10**(epsilon*l*c_{GS}(t))*(k_r + k_s)))
+
+    In this case, we have to specify the incident photon flux and the epsilon at the irradiation wavelength for
+    the ground state (GS). Model is simulated for 6 initial concentrations of the ground state from 0.5e-5 to 1.5e-5.
+    Note that the initial absorbance of the compound is given by A = l * c * epsilon.
+
+    >>> print(model.symbols['rate_constants'], model.symbols['compartments'])
+    [k_s, k_r] [c_{GS}(t), c_{^1S}(t), c_{P}(t)]
+    >>> model.simulate_model([1e9, 1e8], [np.linspace(0.5e-5, 1.5e-5, 6), 0, 0], 
+    ...                      t_max=500, flux=1e-6, epsilon=1e5, l=1, plot_separately=True)
     """
 
     delimiters = {
@@ -92,11 +172,8 @@ class PhotoKineticSymbolicModel:
     }
 
     def __init__(self):
-        # self.initial_conditions = {}
-        self.elem_reactions = []  # list of dictionaries of elementary reactions
+        self.elem_reactions = []  
         self.scheme = ""
-        self.last_SS_solution = dict(diff_eqs={}, SS_eqs={})  # contains dictionaries
-        self._rate_constant_orders = []
 
         self.symbols = dict(compartments=[],
                             equations=[],
@@ -106,7 +183,14 @@ class PhotoKineticSymbolicModel:
                             l=None,
                             epsilon=None)
 
-        self.last_simul_matrix = None # simulated traces
+        # orders of the rate constants in the model
+        self._rate_constant_orders = []
+        self.last_SS_solution = dict(diff_eqs={}, SS_eqs={})  # contains dictionaries
+
+        # simulated traces with dimension of k x n x t
+        # where k is number of inner parameters to simulate the model for the
+        # n is number of compartments and t is number of time points
+        self.C_tensor = None 
 
     @classmethod
     def from_text(cls, scheme: str):
@@ -123,17 +207,26 @@ class PhotoKineticSymbolicModel:
         constant name is not specified, default name using the reactants and products will be used.
         Comments are denoted by '#'. All characters after this symbol will be ignored.
 
-        Eg. absorption and formation of singlet state, triplet and then photoproducts which
+        Example
+        ----------
+        Absorption and formation of singlet state, triplet and then photoproducts which
         irreversibly reacts with the ground state
             GS -hv-> S_1 --> GS // k_S  # absorption and singlet state decay
+
             S_1 --> T_0 --> GS // k_{isc} ; k_T  # intersystem crossing and triplet decay
+
             T_0 --> P // k_P  # reaction from triplet state to form the products
+
             P + GS -->  // k_r  # products reacts irreversibly with the ground state
 
-        :param scheme:
-            input text-based model
-        :return:
-            Model representing input reaction scheme.
+        Parameters
+        ----------
+        scheme : str
+            Imput text-based model.
+
+        Returns
+        ----------
+        Model representing input reaction scheme.
         """
 
         if scheme.strip() == '':
@@ -215,18 +308,33 @@ class PhotoKineticSymbolicModel:
                     # print(r_name)
 
                 if r_type == 'absorption' and len(ps) == 0:
-                    raise ValueError(f"Missing a species after absorption arrow ({cls.delimiters['absorption']}).")
+                    raise ValueError(f"Missing species after absorption arrow ({cls.delimiters['absorption']}).")
 
                 _model.add_elementary_reaction(rs, ps, type=r_type, rate_constant_name=r_name)
 
-        _model.build_equations()
+        _model._build_equations()
 
         return _model
 
-    def add_elementary_reaction(self, from_comp=('A', 'A'), to_comp=('B', 'C'), type='reaction', rate_constant_name=None):
+    def add_elementary_reaction(self, from_comp: Union[List[str], Tuple[str]] = ('A', 'A'),
+                                      to_comp: Union[List[str], Tuple[str]] = ('B', 'C'),
+                                      type: str = 'reaction',
+                                      rate_constant_name: Union[None, str] = None):
         """
-        Adds the elementary reaction to the model. type can be either 'reaction' or 'absorption'.
+        Adds the elementary reaction to the model.
+
+        Parameters
+        ----------
+        from_comp : 
+            List/tuple of reactants. Default ('A', 'A').
+        to_comp : 
+            List/tuple of products. Can be empty list/tuple. Default ('B', 'C')
+        type: 
+            Type of the elementary reaction. Can be either 'reaction' or 'absorption'.
+        rate_constant_name: 
+            Name of the rate constant. Optional.
         """
+
         from_comp = from_comp if isinstance(from_comp, (list, tuple)) else [from_comp]
         to_comp = to_comp if isinstance(to_comp, (list, tuple)) else [to_comp]
 
@@ -238,14 +346,18 @@ class PhotoKineticSymbolicModel:
         self.elem_reactions.append(el)
 
     def print_model(self):
+        """
+        Print the model in LaTeX format. Chooses the correct way of printing the model based 
+        on the environment (Jupyter notebook or Google colab).
+        """
+
         if IN_COLAB:
             self.pprint_model_no_env()
         else:
-            self.pprint_model_jupyter()
+            self.pprint_model_align_env()
 
-    def pprint_model_jupyter(self):
-        """Pretty prints model. Will work only in Jupyter notebook or QtConsole environment.
-        This uses the align latex environment."""
+    def pprint_model_align_env(self):
+        """Pretty prints model. Uses the align LaTeX environment."""
 
         latex_eq = ''
 
@@ -261,8 +373,7 @@ class PhotoKineticSymbolicModel:
         display(Math(latex_eq))
 
     def pprint_model_no_env(self):
-        """Pretty prints model. Will work only in Jupyter notebook or QtConsole environment.
-        No environment is used here."""
+        """Pretty prints model. Does not use the math environment."""
 
         for el in self.elem_reactions:
             reactants = ' + '.join([f'\\mathrm{{{comp}}}' for comp in el['from_comp']])
@@ -275,7 +386,16 @@ class PhotoKineticSymbolicModel:
             display(Math(latex_eq))
 
     def pprint_equations(self, subs: List[tuple] = None):
-        """Pretty prints the equations. Will work only in Jupyter notebook or QtConsole environment."""
+        """
+        Pretty prints the equations. It allows to substitute some parts of the equation
+        with desired symbols.
+        
+        Parameters
+        ----------
+        subs : 
+            List of tuples. In each tuple, first entry is the old expression and second
+            entry is the new expression. Default is None.
+        """
 
         if self.symbols['equations'] is None:
             return
@@ -288,9 +408,9 @@ class PhotoKineticSymbolicModel:
 
             display(_eq)
 
-    def get_compartments(self):
+    def get_compartments(self) -> list:
         """
-        Return the compartment names, the names are case sensitive.
+        Return the compartment names in the model, the names are case sensitive.
         """
         names = []
         for el in self.elem_reactions:
@@ -304,9 +424,19 @@ class PhotoKineticSymbolicModel:
         return names
 
     def steady_state_approx(self, compartments: Union[List[str], Tuple[str]],
-                            subs: List[tuple] = None, print_solution=True):
-        """Performs the steady state approximation for the given species and displays the 
-        result."""
+                            print_solution: bool = True):
+        """
+        Performs the steady state approximation for the given species.
+
+        Parameters
+        ----------
+        compartments : 
+            List/tuple of compartments given as strings for which steady state
+            approximation will be perfomerd. Names of compartments must be as
+            those used for constructing the model.
+        print_solution: 
+            If True, the solution will be pretty printed. Default True.
+        """
 
         if self.symbols['equations'] is None:
             return
@@ -337,9 +467,10 @@ class PhotoKineticSymbolicModel:
             eq = Eq(var, expression)
             eq = factor(simplify(eq))
 
-            if subs:
-                for old, new in subs:
-                    eq = eq.subs(old, new)
+            # TODO -> allow substitutions
+            # if subs:
+            #     for old, new in subs:
+            #         eq = eq.subs(old, new)
 
             if comp in compartments:
                 self.last_SS_solution['SS_eqs'][comp] = eq
@@ -349,6 +480,8 @@ class PhotoKineticSymbolicModel:
                 display(eq)
 
     def clear_model(self):
+        """Clears the model."""
+
         self.symbols['compartments'].clear()
         self.symbols['equations'].clear()
         self.symbols['rate_constants'].clear()
@@ -357,17 +490,21 @@ class PhotoKineticSymbolicModel:
         self.symbols['l'] = None
         self.symbols['epsilon'] = None
         self._rate_constant_orders.clear()
+        self.C_tensor = None
+        self.scheme = ''
 
 
-    def build_equations(self):
-        """Builds the equations. Converts the elementary reactions reperezentation to sympy differential equations."""
+    def _build_equations(self):
+        """
+        Converts the elementary reactions to sympy representation of differential equations.
+        """
 
         self.clear_model()
 
         comps = self.get_compartments()
 
-        # right hand side of diff. equations
-        sym_rhss = len(comps) * [0]
+        # right hand sides of diff. equations
+        sympy_rhss = len(comps) * [0]
 
         # time and concentrations of absorbed photons J
         self.symbols['time'], self.symbols['flux'] = symbols('t J')
@@ -389,7 +526,6 @@ class PhotoKineticSymbolicModel:
             r_names.append(el['rate_constant_name'])
             self._rate_constant_orders.append(len(el['from_comp']))
 
-        # r_names = list(map(lambda el: el['rate_constant_name'], filter(lambda el: el['type'] == 'reaction', self.elem_reactions)))
         self.symbols['rate_constants'] = list(map(Symbol, r_names))
 
         # symbolic rate constants dictionary
@@ -405,10 +541,10 @@ class PhotoKineticSymbolicModel:
                 # 1 - 10 ** (-l * eps * c)
                 fraction_abs = 1 - 10 ** (-self.symbols['l'] * self.symbols['epsilon'] * self.symbols['compartments'][k])
 
-                sym_rhss[k] -= self.symbols['flux'] * fraction_abs
+                sympy_rhss[k] -= self.symbols['flux'] * fraction_abs
 
                 k = i_to[0]
-                sym_rhss[k] += self.symbols['flux'] * fraction_abs
+                sympy_rhss[k] += self.symbols['flux'] * fraction_abs
 
                 continue
 
@@ -418,12 +554,12 @@ class PhotoKineticSymbolicModel:
                 forward_prod *= self.symbols['compartments'][k]  # forward rate products, eg. k_AB * [A] * [B]
 
             for k in i_from:
-                sym_rhss[k] -= forward_prod   # reactants
+                sympy_rhss[k] -= forward_prod   # reactants
 
             for k in i_to:
-                sym_rhss[k] += forward_prod   # products
+                sympy_rhss[k] += forward_prod   # products
 
-        for f, rhs in zip(self.symbols['compartments'], sym_rhss):
+        for f, rhs in zip(self.symbols['compartments'], sympy_rhss):
             # construct differential equation
             _eq = Eq(f.diff(self.symbols['time']), rhs)
             self.symbols['equations'].append(_eq)
@@ -431,25 +567,84 @@ class PhotoKineticSymbolicModel:
     def simulate_model(self, rate_constants: Union[List, Tuple, np.ndarray],
                        initial_concentrations: Union[List, Tuple, np.ndarray],
                        constant_compartments: Union[None, List[str], Tuple[str]] = None, 
-                       t_max=1000, flux=1e-8, l=1, epsilon=1e5, t_points=1000, use_SS_approx: bool = True,
-                       yscale='linear', plot_separately: bool = True, scale=True, figsize=(6, 3),
-                       cmap='plasma', lw=2, legend_fontsize=10, legend_labelspacing=0.2, filepath=None, dpi=300, transparent=False):
-
+                       t_max: Union[float, int] = 1e3, t_points: int = 1000, flux: float = 1e-8, l: float = 1,
+                       epsilon: float = 1e5, use_SS_approx: bool = True, ODE_solver: str = 'Radau', 
+                       plot_separately: bool = True,  figsize: Union[tuple, list] = (6, 3), yscale: str = 'linear',
+                       cmap: str = 'plasma', lw: float = 2, legend_fontsize: int = 10, legend_labelspacing: float = 0,
+                       filepath: Union[None, str] = None, dpi: int = 300, transparent: bool = False,
+                       plot_results: bool = True, scale: bool = True):
         """
-            constant_compartments,  if specified, the concetration of those will be constant and value from 
-            initial concentration will be used, this will have only effect on those compartments, which are 
-            numerically simulated
+        Simulates the current model and plots the results if ``plot_results`` is True (default True). Parameters
+        rate_constant and initial_concentrations can contain iterables. In this case, the model will be simulated
+        for each of the value in the iterable arrays. Multiple iterables are allowed. In such case, lengths of
+        iterable arrays in parameters rate_constants and intial_concentrations has to be equal. The result of
+        the simulation is saved in a class attribute C_tensor.
 
-            if use_SS_approx is True, the last SS approximation will be used to simulate the model, instead
-            of taking all diff. equations
+        Parameters
+        ----------
+        rate_constants : 
+            List/tuple of rate constants. They have to occur in the same order as are saved in the model.
+            Please, check the order in ``symbols['rate_constants']`` attribute. Rate constants can contain
+            iterables (list, tuple). In this case the model will be simulated for each of the parameter in
+            the iterable. It can contain more that one iterables, in this case, length of iterable arrays must 
+            be the same.
+        initial_concentrations : 
+            List/tuple of initial concentrations. They have to occur in the same order as are saved in the model.
+            Please, check the order in ``symbols['compartments']`` attribute. Initial concentrations can contain
+            iterables (list, tuple). In this case the model will be simulated for each of the parameter in
+            the iterable. It can contain more that one iterables, in this case, length of iterable arrays must 
+            be the same.
+        constant_compartments: list of strings
+            If specified (default None), the values of these compartments will be constant and the value from
+            initial_concentration array will be used. Constant compartments will not be plotted. If the SS 
+            approximation was performed for the constant compartment, it will have not effect and the SS 
+            solution will be used instead.
+        t_max: 
+            Maximum time in the range of time points the model will be simulated for. Optional. Default 1e3.
+        t_points: 
+            Number of time points used to simulate the model for. Optional. Default 1000.
+        flux: 
+            Incident photon flux. Optional. Default 1e-8.
+        l: 
+            Length of the cuvette. Optional. Default 1.
+        epsilon: 
+            Molar absorption coefficient at the irradiation wavelength. Optional. Default 1e5.
+        use_SS_approx: 
+            If True (default True), the equations from SS approximation will be used to simulate the model
+            (only if it was performed for the model).
+        ODE_solver: 
+            Name of the ODE solver used to numerically simulate the model. Default 'Radau'. Available options are:
+            'RK45', 'RK23', 'DOP853', 'Radau', 'BDF', 'LSODA'. For details, see
+            https://docs.scipy.org/doc/scipy/reference/generated/scipy.integrate.solve_ivp.html#scipy.integrate.solve_ivp
 
-            ode_solver, default Radau method, will work also on non-SS differential equations
-
-            rate_constants and intial_concentrations can be a list of floats in a correct order, or it can 
-            also contain list in which the simulation will performed as many times as is the length of the list
-
-            it can be [1, 0, 1e9, [1, 5, 9], [5, 8, 4]]
-
+        plot_separately: 
+            If True (default True), the plot will have n graphs in which n is number of compartments to plot. In each graph,
+            the one compartment will be plotted. If there are some iterables (length k) in the input parameters, each graph
+            will have k curves.
+        figsize: tuple 
+            Figure size of one graph. Optional. Default (6, 3): (width, height).
+        yscale: 
+            Scale of the y axis. Optional. Default 'linear'. Could be 'log', etc.
+        cmap: 
+            Color map used to color the individual curves if plot_separately = True.
+        lw: 
+            Line width of the curves. Optional. Default 2.
+        legend_fontsize: 
+            Fontsize of the legend. Optional. Default 10.
+        legend_labelspacing: 
+            Vertical spacing of the labels in legend. Optional. Default 0. Can be negative.
+        filepath: 
+            If specified (default None), the plot will be saved into this location with a specified filename.
+        dpi: 
+            DPI of the resulting plot that will be saved to file. Optional. Default 300.
+        transparent: 
+            If True, the saved image will be transparent. Optional. Default False.
+        plot_results: 
+            If True, the result will be plotted. Optional. Default True.
+        scale: 
+            If True, rate constant, initial concentrations and epsilon and flux will be scaled by suitable factor
+            (determined by the geometric mean of the initial concentrations). This can help to reduce numerical errors
+            in the integrator. Optional. Default True.
         """
         
         if len(self.symbols['equations']) == 0:
@@ -465,19 +660,20 @@ class PhotoKineticSymbolicModel:
         assert len(initial_concentrations) == n, "Length of initial_concentrations must match the number of compartments."
         assert len(rate_constants) == n_rates, "Length of rate_constants must match the number of rate constants."
 
-        # shape of matrices are k x n where k is number of parameters within the array to simulate
-        rates, idx_iter_rates = get_matrix(rate_constants, n_rates)
-        init_c, idx_iter_init_c = get_matrix(initial_concentrations, n)
+        # shape of matrices are k x l where k is number of parameters within the array to simulated
+        # and l number of parameters (n_rates or n)
+        rates, idx_iter_rates = get_matrix(rate_constants)
+        init_c, idx_iter_init_c = get_matrix(initial_concentrations)
 
         k = max(rates.shape[0], init_c.shape[0])  # number of inner parameters in a both parameter arrays
         
         # tile the other array so the first dimension of both arrays is k
         if rates.shape[0] < init_c.shape[0]:
             rates = np.tile(rates[0], (k, 1))
-        elif init_c.shape[0] < rates.shape[0]:
+        elif rates.shape[0] > init_c.shape[0]:
             init_c = np.tile(init_c[0], (k, 1))
 
-        self.last_simul_matrix = None
+        self.C_tensor = None
         times = np.linspace(0, t_max, int(t_points))
 
         # scale rate constants, flux, epsilon and initial_concentrations for less numerial errors in
@@ -524,7 +720,7 @@ class PhotoKineticSymbolicModel:
         for i in range(k):
             # numerically integrate
             # https://docs.scipy.org/doc/scipy/reference/generated/scipy.integrate.solve_ivp.html#scipy.integrate.solve_ivp
-            sol = solve_ivp(dc_dt, (0, t_max), init_c_sc[i, idxs2simulate], method='Radau', vectorized=False, dense_output=True,
+            sol = solve_ivp(dc_dt, (0, t_max), init_c_sc[i, idxs2simulate], method=ODE_solver, vectorized=False, dense_output=True,
                     args=(rates_sc[i, :], flux, l, epsilon))
 
             C[i, idxs2simulate, :] = sol.sol(times)  # evaluate at dense time points
@@ -538,13 +734,13 @@ class PhotoKineticSymbolicModel:
 
         # scale the traces back to correct values
         C *= coef
-        self.last_simul_matrix = C
+        self.C_tensor = C
 
         # create indexes of only those comps. which will be plotted, so remove all constant comps.
         idxs2plot = set(np.arange(n, dtype=int)) - set(np.asarray(idxs2simulate)[idxs_constant_cast])
 
         comps_cast = [comps[i] for i in idxs2plot]
-        traces_cast = [self.last_simul_matrix[:, i, :] for i in idxs2plot]
+        traces_cast = [self.C_tensor[:, i, :] for i in idxs2plot]
 
         # find what rate constants or initial concentrations are changing
         par_names = []
@@ -556,7 +752,10 @@ class PhotoKineticSymbolicModel:
 
             # combine texts and remove empty entries (in case the the texts are empty)
             par_names.append('; '.join(filter(None, [text_rates, text_init])))
-            
+
+        if not plot_results:
+            return
+
         # plot the results
         if plot_separately:
             n_rows = n - len(idxs_constant_cast)
@@ -655,16 +854,29 @@ if __name__ == '__main__':
     """
 
 
-    model = PhotoKineticSymbolicModel.from_text(model)
-    # print(model.print_text_model())
+    # model = PhotoKineticSymbolicModel.from_text(model)
+    # # print(model.print_text_model())
 
-    # model.simulate_model([1, 10], [0.1, 0], t_max=10, yscale='linear', scale=False)
+    # # model.simulate_model([1, 10], [0.1, 0], t_max=10, yscale='linear', scale=False)
 
 
-    model.steady_state_approx(['^1O_2'], print_solution=False)
-    model.simulate_model([np.linspace(1e-3, 5e-3, 10), 1/9.5e-6, 1e4, 1e9], [1e-3, 0, 0, 95, 1e-3],
-                        constant_compartments=['^3O_2'], t_max=2e3, yscale='linear', scale=True,
-                        plot_separately=False, cmap='plasma')
+    # model.steady_state_approx(['^1O_2'], print_solution=False)
+    # model.simulate_model([np.linspace(1e-3, 5e-3, 6), 1/9.5e-6, 1e4, 1e9], [1e-3, 0, 0, 95, 1e-3],
+    #                     constant_compartments=['^3O_2'], t_max=2e3, yscale='linear', scale=True,
+    #                     plot_separately=False, cmap='plasma')
+
+
+    text_model = """
+    A --> B --> C  // k_1 ; k_2
+    """
+
+    model = PhotoKineticSymbolicModel.from_text(text_model)
+    model.print_model()
+    print(model.symbols['rate_constants'], model.symbols['compartments'])
+    # model.simulate_model([1, 0.5], [1, 0, 0], t_max=10, plot_separately=False)
+    model.pprint_equations()
+    # model.simulate_model([1e9, 1e8], [np.linspace(0.5e-5, 1.5e-5, 6), 0, 0], t_max=500, flux=1e-6, epsilon=1e5, plot_separately=True)
+
 
 
 

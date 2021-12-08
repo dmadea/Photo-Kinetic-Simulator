@@ -6,7 +6,8 @@ import re
 import matplotlib.pyplot as plt
 from matplotlib import cm
 import numpy as np
-from scipy.integrate import odeint, solve_ivp
+from scipy.integrate import solve_ivp
+from scipy.stats.mstats import gmean
 
 from typing import List, Union, Tuple
 
@@ -431,15 +432,16 @@ class PhotoKineticSymbolicModel:
                        initial_concentrations: Union[List, Tuple, np.ndarray],
                        constant_compartments: Union[None, List[str], Tuple[str]] = None, 
                        t_max=1000, flux=1e-8, l=1, epsilon=1e5, t_points=1000, use_SS_approx: bool = True,
-                       yscale='linear', plot_separately: bool = True, scale=True, figsize=(6, 4),
-                       cmap='jet', lw=2, legend_fontsize=12):
+                       yscale='linear', plot_separately: bool = True, scale=True, figsize=(6, 3),
+                       cmap='plasma', lw=2, legend_fontsize=10, legend_labelspacing=0.2, filepath=None, dpi=300, transparent=False):
 
         """
             constant_compartments,  if specified, the concetration of those will be constant and value from 
             initial concentration will be used, this will have only effect on those compartments, which are 
             numerically simulated
 
-            if use_SS_approx is True, 
+            if use_SS_approx is True, the last SS approximation will be used to simulate the model, instead
+            of taking all diff. equations
 
             ode_solver, default Radau method, will work also on non-SS differential equations
 
@@ -468,9 +470,6 @@ class PhotoKineticSymbolicModel:
         init_c, idx_iter_init_c = get_matrix(initial_concentrations, n)
 
         k = max(rates.shape[0], init_c.shape[0])  # number of inner parameters in a both parameter arrays
-
-        # if k != rates.shape[0] or k != init_c.shape[0]:
-        #     raise ValueError("Number of inner parameters in rate_constant and initial_concentrations arrays does not match.")
         
         # tile the other array so the first dimension of both arrays is k
         if rates.shape[0] < init_c.shape[0]:
@@ -487,7 +486,9 @@ class PhotoKineticSymbolicModel:
         init_c_sc = init_c.copy()
         rates_sc = rates.copy()
         if scale:
-            coef = init_c[init_c > 0].min()  # scaling coefficient, lets choose the minimal concentration given
+            # scaling coefficient, calculate it as geometric mean from non-zero initial concentrations
+            coef = gmean(init_c[init_c > 0])  
+            # print(coef)
             init_c_sc /= coef
             epsilon *= coef
             flux /= coef
@@ -539,10 +540,6 @@ class PhotoKineticSymbolicModel:
         C *= coef
         self.last_simul_matrix = C
 
-        # n_rows = n - len(idxs_constant_cast) if plot_separately else 1
-        # figsize = (figsize[0] , figsize[1] * n_rows / 2) if plot_separately else figsize
-        # fig, axes = plt.subplots(n_rows, 1, figsize=figsize, sharex=plot_separately)
-
         # create indexes of only those comps. which will be plotted, so remove all constant comps.
         idxs2plot = set(np.arange(n, dtype=int)) - set(np.asarray(idxs2simulate)[idxs_constant_cast])
 
@@ -563,7 +560,7 @@ class PhotoKineticSymbolicModel:
         # plot the results
         if plot_separately:
             n_rows = n - len(idxs_constant_cast)
-            figsize = (figsize[0] , figsize[1] * n_rows / 2)
+            figsize = (figsize[0] , figsize[1] * n_rows)
             fig, axes = plt.subplots(n_rows, 1, figsize=figsize, sharex=True)
 
             # colormap for inner parameters
@@ -574,7 +571,7 @@ class PhotoKineticSymbolicModel:
                     ax.plot(times, trace[j], label=label if i == 0 else '', lw=lw, color=cmap(j/trace.shape[0]))
                 ax.set_ylabel('Concentration')
                 if i == 0:
-                    ax.legend(frameon=False, fontsize=legend_fontsize)
+                    ax.legend(frameon=False, fontsize=legend_fontsize, labelspacing=legend_labelspacing)
                 ax.set_yscale(yscale)
                 ax.set_title(f'$\\mathrm{{{comp}}}$')
                 ax.tick_params(axis='both', which='major', direction='in')
@@ -604,16 +601,12 @@ class PhotoKineticSymbolicModel:
                 ax.tick_params(axis='both', which='minor', direction='in')
                 ax.xaxis.set_ticks_position('both')
                 ax.yaxis.set_ticks_position('both')
-                ax.legend(frameon=False, fontsize=legend_fontsize)
+                ax.legend(frameon=False, fontsize=legend_fontsize, labelspacing=legend_labelspacing)
             
         plt.tight_layout()
+        if filepath:
+            plt.savefig(filepath, dpi=dpi, transparent=transparent)
         plt.show()
-
-                    # don't plot constant compartments, show only their concetration in label
-                    # if constant_compartments is not None and label in constant_compartments:
-                        # i = comps.index(label)
-                        # ax.plot([], [], label=f'$[\\mathrm{{{label}}}]={init_c[i] * coef:.3g}$ M', lw=2.5, color=color)
-                        # continue
 
     def print_text_model(self):
         """Print the model as text."""
@@ -669,9 +662,9 @@ if __name__ == '__main__':
 
 
     model.steady_state_approx(['^1O_2'], print_solution=False)
-    model.simulate_model([1e-3, 1/9.5e-6, 1e4, 1e9], [np.linspace(1e-3, 1e-2, 3), 0, 0, 95, 1e-3],
-                        constant_compartments=['^3O_2'], t_max=1e3, yscale='linear', scale=False,
-                        plot_separately=False)
+    model.simulate_model([np.linspace(1e-3, 5e-3, 10), 1/9.5e-6, 1e4, 1e9], [1e-3, 0, 0, 95, 1e-3],
+                        constant_compartments=['^3O_2'], t_max=2e3, yscale='linear', scale=True,
+                        plot_separately=False, cmap='plasma')
 
 
 

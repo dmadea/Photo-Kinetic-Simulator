@@ -13,6 +13,12 @@ from typing import List, Union, Tuple
 
 COLORS = ['blue', 'red', 'green', 'orange', 'black', 'yellow']
 
+plt.rcParams.update({'font.size': 14})
+plt.rcParams.update({'xtick.major.size': 5, 'ytick.major.size': 5})
+plt.rcParams.update({'xtick.minor.size': 2.5, 'ytick.minor.size': 2.5})
+plt.rcParams.update({'xtick.major.width': 1, 'ytick.major.width': 1})
+plt.rcParams.update({'xtick.minor.width': 0.8, 'ytick.minor.width': 0.8})
+
 try:
     import google.colab
     IN_COLAB = True

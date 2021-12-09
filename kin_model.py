@@ -156,7 +156,7 @@ class PhotoKineticSymbolicModel:
     Eq(c_{^1S}(t), J*(10**(epsilon*l*c_{GS}(t)) - 1)/(10**(epsilon*l*c_{GS}(t))*(k_r + k_s)))
     Eq(Derivative(c_{P}(t), t), J*k_r*(10**(epsilon*l*c_{GS}(t)) - 1)/(10**(epsilon*l*c_{GS}(t))*(k_r + k_s)))
 
-    In this case, we have to specify the incident photon flux and the epsilon at the irradiation wavelength for
+    In the following case, we have to specify the incident photon flux and the epsilon at the irradiation wavelength for
     the ground state (GS). Model is simulated for 6 initial concentrations of the ground state from 0.5e-5 to 1.5e-5.
     Note that the initial absorbance of the compound is given by A = l * c * epsilon.
 
@@ -769,7 +769,7 @@ class PhotoKineticSymbolicModel:
                     label = '' if par_names[j] == '' else f'${par_names[j]}$'
                     ax.plot(times, trace[j], label=label if i == 0 else '', lw=lw, color=cmap(j/trace.shape[0]))
                 ax.set_ylabel('Concentration')
-                if i == 0:
+                if i == 0 and k > 1:
                     ax.legend(frameon=False, fontsize=legend_fontsize, labelspacing=legend_labelspacing)
                 ax.set_yscale(yscale)
                 ax.set_title(f'$\\mathrm{{{comp}}}$')
@@ -818,31 +818,6 @@ class PhotoKineticSymbolicModel:
 
 
 if __name__ == '__main__':
-
-    # model = """
-    # ^1BR --> BR // k_S  # population of singlet state and decay to GS with rate k_S
-    # ^1BR --> ^3BR --> BR -hv-> ^1BR  // k_{isc}; k_T
-    # ^3BR + ^3O_2 --> ^1O_2 + BR  // k_{TT}
-    # ^1O_2 --> ^3O_2  // k_d
-    # BR + ^1O_2 --> // k_r
-    
-    # """
-
-    model = """
-    BR -hv-> ^1BR --> BR // k_S  # population of singlet state and decay to GS with rate k_S
-    ^1BR -hv-> 
-    """
-
-    model = """
-    A --> B  // k_1 
-    2B --> //  k_2
-
-    """
-    # model = """
-    # A -hv-> ^1A --> A           // k_d  # absorption and singlet state decay
-    # ^1A -->  // k_r
-
-    # """git
 
     model = """
     ArO_2 --> Ar + ^1O_2             // k_1  # absorption and singlet state decay

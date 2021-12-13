@@ -9,7 +9,7 @@ import numpy as np
 from scipy.integrate import solve_ivp
 from scipy.stats.mstats import gmean
 
-from typing import List, Union, Tuple
+from typing import Iterable, List, Union, Tuple
 
 COLORS = ['blue', 'red', 'green', 'orange', 'black', 'yellow']
 
@@ -59,7 +59,7 @@ def split_delimiters(text: str, delimiters: Union[List[str], Tuple[str]]) -> Lis
     return list(zip(entries, delimiters))
 
 
-def get_matrix(parameters: Union[list, tuple, np.ndarray]) -> tuple:
+def get_matrix(parameters: Union[None, list, tuple, np.ndarray]) -> tuple:
     """
     Parsers the input parameters and finds all the iterable entries. If there are
     multiple iterable entries in the parameters, all have to have the same length 
@@ -78,6 +78,9 @@ def get_matrix(parameters: Union[list, tuple, np.ndarray]) -> tuple:
     ----------
     Returns a tuple of resulting matrix and list of indexes of iterables in parameters.
     """
+
+    if parameters is None:
+        return np.empty((1, 0), dtype=np.float64), []
 
     n_params = len(parameters)
     is_iterable = list(map(np.iterable, parameters))
@@ -187,16 +190,16 @@ class PhotoKineticSymbolicModel:
                             time=None,
                             flux=None, 
                             l=None,
-                            epsilon=None)
+                            epsilon=None,
+                            substitutions=[])
 
         # orders of the rate constants in the model
         self._rate_constant_orders = []
         self.last_SS_solution = dict(diff_eqs={}, SS_eqs={})  # contains dictionaries
 
-        # simulated traces with dimension of k x n x t
-        # where k is number of inner parameters to simulate the model for the
-        # n is number of compartments and t is number of time points
         self.C_tensor = None 
+
+
 
     @classmethod
     def from_text(cls, scheme: str):
@@ -234,6 +237,8 @@ class PhotoKineticSymbolicModel:
         ----------
         Model representing input reaction scheme.
         """
+
+        # TODO -> take into account + in exponents, like H^+, + should not be in this case used as separator
 
         if scheme.strip() == '':
             raise ValueError("Parameter scheme is empty!")
@@ -391,28 +396,20 @@ class PhotoKineticSymbolicModel:
 
             display(Math(latex_eq))
 
-    def pprint_equations(self, subs: List[tuple] = None):
+    def pprint_equations(self):
         """
-        Pretty prints the equations. It allows to substitute some parts of the equation
-        with desired symbols.
-        
-        Parameters
-        ----------
-        subs : 
-            List of tuples. In each tuple, first entry is the old expression and second
-            entry is the new expression. Default is None.
+        Pretty prints the equations.
         """
 
         if self.symbols['equations'] is None:
             return
 
         for eq in self.symbols['equations']:
-            _eq = eq
-            if subs:
-                for old, new in subs:
-                    _eq = _eq.subs(old, new)
-
-            display(_eq)
+            # _eq = eq
+            # if subs:
+            #     for old, new in subs:
+            #         _eq = _eq.subs(old, new)
+            display(eq)
 
     def get_compartments(self) -> list:
         """
@@ -430,6 +427,7 @@ class PhotoKineticSymbolicModel:
         return names
 
     def steady_state_approx(self, compartments: Union[List[str], Tuple[str]],
+                            subs: Union[None, Iterable[tuple]] = None,
                             print_solution: bool = True):
         """
         Performs the steady state approximation for the given species.
@@ -440,6 +438,9 @@ class PhotoKineticSymbolicModel:
             List/tuple of compartments given as strings for which steady state
             approximation will be perfomerd. Names of compartments must be as
             those used for constructing the model.
+        subs : 
+            List of tuples. In each tuple, first entry is the old expression and second
+            entry is the new expression. Default is None.
         print_solution: 
             If True, the solution will be pretty printed. Default True.
         """
@@ -468,20 +469,35 @@ class PhotoKineticSymbolicModel:
         if len(solution) == 0:
             raise ValueError('Steady state solution for the given input does not exist.')
 
+        # gather all symbols that will be used for substitution
+        if subs:
+            self.symbols['substitutions'].clear()
+            free_symbols = set()
+            for old, new in subs:
+                free_symbols = free_symbols.union(new.free_symbols)
+            self.symbols['substitutions'] = list(free_symbols)
+
         # the order of solutions is the same as the input
         for comp, (var, expression) in zip(all_compartments, solution.items()):
             eq = Eq(var, expression)
-            eq = factor(simplify(eq))
+            
+            if subs:
+                for old, new in subs:
+                    eq = eq.subs(old, new)
+            
+            eq = factor(simplify(eq), deep=True)
 
-            # TODO -> allow substitutions
-            # if subs:
-            #     for old, new in subs:
-            #         eq = eq.subs(old, new)
+            if subs:
+                for old, new in subs:
+                    eq = eq.subs(old, new)
+
+            eq = factor(simplify(eq), deep=True)
 
             if comp in compartments:
                 self.last_SS_solution['SS_eqs'][comp] = eq
             else:
                 self.last_SS_solution['diff_eqs'][comp] = eq
+
             if print_solution:
                 display(eq)
 
@@ -495,6 +511,8 @@ class PhotoKineticSymbolicModel:
         self.symbols['flux'] = None
         self.symbols['l'] = None
         self.symbols['epsilon'] = None
+        self.symbols['substitutions'].clear()
+
         self._rate_constant_orders.clear()
         self.C_tensor = None
         self.scheme = ''
@@ -567,18 +585,21 @@ class PhotoKineticSymbolicModel:
 
         for f, rhs in zip(self.symbols['compartments'], sympy_rhss):
             # construct differential equation
-            _eq = Eq(f.diff(self.symbols['time']), rhs)
+            rhs_factored = factor(rhs, deep=True)
+
+            _eq = Eq(f.diff(self.symbols['time']), rhs_factored)
             self.symbols['equations'].append(_eq)
 
     def simulate_model(self, rate_constants: Union[List, Tuple, np.ndarray],
                        initial_concentrations: Union[List, Tuple, np.ndarray],
-                       constant_compartments: Union[None, List[str], Tuple[str]] = None, 
+                       substitutions: Union[None, List, Tuple, np.ndarray] = None, 
+                       constant_compartments: Union[None, List[str], Tuple[str]] = None,
                        t_max: Union[float, int] = 1e3, t_points: int = 1000, flux: float = 1e-8, l: float = 1,
                        epsilon: float = 1e5, use_SS_approx: bool = True, ODE_solver: str = 'Radau', 
                        plot_separately: bool = True,  figsize: Union[tuple, list] = (6, 3), yscale: str = 'linear',
                        cmap: str = 'plasma', lw: float = 2, legend_fontsize: int = 10, legend_labelspacing: float = 0,
                        filepath: Union[None, str] = None, dpi: int = 300, transparent: bool = False,
-                       plot_results: bool = True, scale: bool = True):
+                       plot_results: bool = True, scale: bool = True, auto_convert_units: bool = True):
         """
         Simulates the current model and plots the results if ``plot_results`` is True (default True). Parameters
         rate_constant and initial_concentrations can contain iterables. In this case, the model will be simulated
@@ -591,15 +612,17 @@ class PhotoKineticSymbolicModel:
         rate_constants : 
             List/tuple of rate constants. They have to occur in the same order as are saved in the model.
             Please, check the order in ``symbols['rate_constants']`` attribute. Rate constants can contain
-            iterables (list, tuple). In this case the model will be simulated for each of the parameter in
+            iterables (list, tuple, np.ndarray). In this case the model will be simulated for each of the parameter in
             the iterable. It can contain more that one iterables, in this case, length of iterable arrays must 
             be the same.
         initial_concentrations : 
             List/tuple of initial concentrations. They have to occur in the same order as are saved in the model.
             Please, check the order in ``symbols['compartments']`` attribute. Initial concentrations can contain
-            iterables (list, tuple). In this case the model will be simulated for each of the parameter in
+            iterables (list, tuple, np.ndarray). In this case the model will be simulated for each of the parameter in
             the iterable. It can contain more that one iterables, in this case, length of iterable arrays must 
             be the same.
+        substitutions :
+            TODO
         constant_compartments: list of strings
             If specified (default None), the values of these compartments will be constant and the value from
             initial_concentration array will be used. Constant compartments will not be plotted. If the SS 
@@ -651,6 +674,8 @@ class PhotoKineticSymbolicModel:
             If True, rate constant, initial concentrations and epsilon and flux will be scaled by suitable factor
             (determined by the geometric mean of the initial concentrations). This can help to reduce numerical errors
             in the integrator. Optional. Default True.
+        auto_convert_units:
+            If True, units of concentrations and rate constants will be automatically converted to m, micro, nano, etc. units.
         """
         
         if len(self.symbols['equations']) == 0:
@@ -670,14 +695,17 @@ class PhotoKineticSymbolicModel:
         # and l number of parameters (n_rates or n)
         rates, idx_iter_rates = get_matrix(rate_constants)
         init_c, idx_iter_init_c = get_matrix(initial_concentrations)
+        subs, idx_subs = get_matrix(substitutions)
 
-        k = max(rates.shape[0], init_c.shape[0])  # number of inner parameters in a both parameter arrays
+        k = max(rates.shape[0], init_c.shape[0], subs.shape[0])  # number of inner parameters in a all parameter arrays
         
         # tile the other array so the first dimension of both arrays is k
-        if rates.shape[0] < init_c.shape[0]:
+        if rates.shape[0] != k:
             rates = np.tile(rates[0], (k, 1))
-        elif rates.shape[0] > init_c.shape[0]:
+        if init_c.shape[0] != k:
             init_c = np.tile(init_c[0], (k, 1))
+        if subs.shape[0] != k:
+            subs = np.tile(subs[0], (k, 1))
 
         self.C_tensor = None
         times = np.linspace(0, t_max, int(t_points))
@@ -697,7 +725,8 @@ class PhotoKineticSymbolicModel:
             # second and higher orders needs to be appropriately scaled, by coef ^ (rate order - 1)
             rates_sc *= coef ** (np.asarray(self._rate_constant_orders, dtype=np.float64) - 1)
 
-        symbols = self.symbols['rate_constants'] + self.symbols['compartments'] + [self.symbols['flux'], self.symbols['l'], self.symbols['epsilon']]
+        symbols = self.symbols['rate_constants'] + self.symbols['compartments'] + self.symbols['substitutions'] + \
+                  [self.symbols['flux'], self.symbols['l'], self.symbols['epsilon']]
 
         sym_eqs = list(self.last_SS_solution['diff_eqs'].values()) if use_SS_approx else self.symbols['equations']
 
@@ -712,11 +741,11 @@ class PhotoKineticSymbolicModel:
             idxs_constant = map(comps.index, filter(lambda c: c in comps, constant_compartments))
             idxs_constant_cast = list(map(idxs2simulate.index, filter(lambda c: c in idxs2simulate, idxs_constant)))
 
-        def dc_dt(t, c, rates, flux, l, epsilon):
+        def dc_dt(t, c, rates, subs, flux, l, epsilon):
             _c = np.empty(n)  # need to cast the concentations to have the original size of the compartments
             _c[idxs2simulate] = c
 
-            solution = np.asarray([f(*rates, *_c, flux, l, epsilon) for f in d_funcs])
+            solution = np.asarray([f(*rates, *_c, *subs, flux, l, epsilon) for f in d_funcs])
             solution[idxs_constant_cast] = 0  # set the change of constant compartments to zero
 
             return solution
@@ -727,7 +756,7 @@ class PhotoKineticSymbolicModel:
             # numerically integrate
             # https://docs.scipy.org/doc/scipy/reference/generated/scipy.integrate.solve_ivp.html#scipy.integrate.solve_ivp
             sol = solve_ivp(dc_dt, (0, t_max), init_c_sc[i, idxs2simulate], method=ODE_solver, vectorized=False, dense_output=True,
-                    args=(rates_sc[i, :], flux, l, epsilon))
+                    args=(rates_sc[i, :], subs[i, :], flux, l, epsilon))
 
             C[i, idxs2simulate, :] = sol.sol(times)  # evaluate at dense time points
 
@@ -736,7 +765,7 @@ class PhotoKineticSymbolicModel:
                 for comp, eq in self.last_SS_solution['SS_eqs'].items():
                     j = comps.index(comp)
                     f = lambdify(symbols, eq.rhs, 'numpy')
-                    C[i, j, :] = f(*rates_sc[i, :], *list(C[i]), flux, l, epsilon)
+                    C[i, j, :] = f(*rates_sc[i, :], *list(C[i]), *subs[i, :], flux, l, epsilon)
 
         # scale the traces back to correct values
         C *= coef
@@ -848,15 +877,33 @@ if __name__ == '__main__':
 
 
     text_model = """
-    A --> B --> C  // k_1 ; k_2
+    GS -hv-> ^1S --> GS  // k_s  # absorption and decay back to ground state
+    ^1S --> P            // k_r  # formation of the photoproduct from the singlet state
     """
 
+    # instantiate the model
     model = PhotoKineticSymbolicModel.from_text(text_model)
-    model.print_model()
-    print(model.symbols['rate_constants'], model.symbols['compartments'])
-    # model.simulate_model([1, 0.5], [1, 0, 0], t_max=10, plot_separately=False)
-    model.pprint_equations()
-    # model.simulate_model([1e9, 1e8], [np.linspace(0.5e-5, 1.5e-5, 6), 0, 0], t_max=500, flux=1e-6, epsilon=1e5, plot_separately=True)
+    model.print_model()  # print the model
+    model.pprint_equations()  # print the ODEs
+    print('\n')
+
+    ks, kr = model.symbols['rate_constants']
+    phi_r, tau_r = symbols('phi_r, tau_r')
+
+
+    # perform the steady state approximation for singlet state
+    model.steady_state_approx(['^1S'], subs=[(kr / (ks+kr), phi_r), (ks+kr, 1/tau_r)])
+
+    # text_model = """
+    # A --> B --> C  // k_1 ; k_2
+    # """
+
+    # model = PhotoKineticSymbolicModel.from_text(text_model)
+    # model.print_model()
+    # print(model.symbols['rate_constants'], model.symbols['compartments'])
+    # # model.simulate_model([1, 0.5], [1, 0, 0], t_max=10, plot_separately=False)
+    # # model.pprint_equations()
+    # model.simulate_model([np.linspace(0.5, 1.5, 10), 0.5], [1, 0, 0], t_max=10, flux=1e-6, epsilon=1e5, plot_separately=True)
 
 
 

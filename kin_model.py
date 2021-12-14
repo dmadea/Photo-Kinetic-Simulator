@@ -104,6 +104,112 @@ def get_matrix(parameters: Union[None, list, tuple, np.ndarray]) -> tuple:
     return param_matrix, arr_idxs
 
 
+def format_number_latex(number: float, sig_figures: int = 3) -> str:
+    """
+    Formats the number in latex format and round it to defined significant figures.
+    If the result is in the exponential format, it will be formatted as
+    ``[number] \\times 10^{[exponent]}``.
+
+    Parameters
+    ----------
+    number :
+        Number to format.
+    sig_figures:
+        Number of significant figures. Optional. Default 3.
+    """
+
+    formatted_num = f'{number:#.{sig_figures}g}'
+
+    if 'e' in formatted_num:
+        num_str, exponent = formatted_num.split('e')
+
+        return f'{num_str} \\times 10^{{{int(exponent)}}}'
+
+    return formatted_num
+
+
+
+def get_time_unit(time: float) -> Tuple[float, str]:
+    """
+    Finds the nearest unit scale and returns the scaling factor
+    and the unit.
+
+    Parameters
+    ----------
+    time :
+        Time to format.
+
+    Returns
+    ----------
+    Returns a tuple of scaling factor and time unit. By multipling the 
+    original time with the scaling factor, time in the determined unit scale 
+    will be obtained.
+    """
+    f, p, n, u, m = np.logspace(-15, -3, 5)
+
+    unit = 's'
+    scaling_factor = 1
+    if f <= time < p:
+        scaling_factor = f 
+        unit = 'fs'
+    elif p <= time < n:
+        scaling_factor = p
+        unit = 'ps'
+    elif n <= time < u:
+        scaling_factor = n
+        unit = 'ns'
+    elif u <= time < m:
+        scaling_factor = u
+        unit = '\\mu s'
+    elif m <= time < 1:
+        scaling_factor = m
+        unit = 'ms'
+    elif 60 <= time < 3600:
+        scaling_factor = 60
+        unit = 'min'
+    elif time >= 3600:
+        scaling_factor = 3600
+        unit = 'h'
+
+    return 1 / scaling_factor, unit
+
+
+def format_time_latex(number: float, sig_figures: int = 3):
+    tol = 1-10**(-sig_figures) + 5 * 10 ** (-sig_figures - 1)
+    f, p, n, u, m = np.logspace(-15, -3, 5) * tol
+
+    unit = 's'
+    if f <= number < p:
+        number *= 1e15 
+        unit =  'fs'
+    elif p <= number < n:
+        number *=  1e12
+        unit =  'ps'
+    elif n <= number < u:
+        number *=  1e9
+        unit =  'ns'
+    elif u <= number < m:
+        number *=  1e6
+        unit =  '\\mu s'
+    elif m <= number < tol:
+        number *=  1e3
+        unit =  'ms'
+    elif tol * 60 <= number < tol * 3600:
+        number /=  60
+        unit =  'min'
+    elif number >= tol * 3600:
+        number /=  3600
+        unit =  'h'
+
+    formatted_num = f'{number:.{sig_figures}g}'
+
+    if 'e' in formatted_num:
+        num, exponent = formatted_num.split('e')
+        return f'{num} \\times 10^{{{int(exponent)}}} {unit}'
+
+    return f'{formatted_num} {unit}'
+
+
 class PhotoKineticSymbolicModel:
     """
     Class representing the Symbolic Model. Can parse the text-based model, display the 
@@ -126,6 +232,10 @@ class PhotoKineticSymbolicModel:
         The latest result of the simulation. It is in shape of [k, n, t] where
         k is the number of iterables inside parameters to simulate the model for, 
         n is the number of compartments, and t is number of time points
+    concentration_unit : 
+        The unit of concentration that will be used to denote the graph axes and 
+        will be used for units of rate constants (those that have an order higher 
+        than first order).
     
     Examples
     ----------
@@ -180,7 +290,7 @@ class PhotoKineticSymbolicModel:
         'reaction': '-->',
     }
 
-    def __init__(self):
+    def __init__(self, concentration_unit: str = 'M'):
         self.elem_reactions = []  
         self.scheme = ""
 
@@ -197,12 +307,12 @@ class PhotoKineticSymbolicModel:
         self._rate_constant_orders = []
         self.last_SS_solution = dict(diff_eqs={}, SS_eqs={})  # contains dictionaries
 
-        self.C_tensor = None 
-
+        self.C_tensor = None
+        self.concentration_unit = concentration_unit
 
 
     @classmethod
-    def from_text(cls, scheme: str):
+    def from_text(cls, scheme: str, **kwargs):
         """
         Takes a text-based model and returns the instance of PhotoKineticSymbolicModel with
         parsed photokinetic model.
@@ -231,7 +341,10 @@ class PhotoKineticSymbolicModel:
         Parameters
         ----------
         scheme : str
-            Imput text-based model.
+            Input text-based model.
+
+        **kwargs : 
+            Other keyword arguments passed to the class constructor.
 
         Returns
         ----------
@@ -243,7 +356,7 @@ class PhotoKineticSymbolicModel:
         if scheme.strip() == '':
             raise ValueError("Parameter scheme is empty!")
 
-        _model = cls()
+        _model = cls(**kwargs)
         _model.scheme = scheme
 
         # find any number of digits that are at the beginning of any characters
@@ -599,7 +712,8 @@ class PhotoKineticSymbolicModel:
                        plot_separately: bool = True,  figsize: Union[tuple, list] = (6, 3), yscale: str = 'linear',
                        cmap: str = 'plasma', lw: float = 2, legend_fontsize: int = 10, legend_labelspacing: float = 0,
                        filepath: Union[None, str] = None, dpi: int = 300, transparent: bool = False,
-                       plot_results: bool = True, scale: bool = True, auto_convert_units: bool = True):
+                       plot_results: bool = True, scale: bool = True, auto_convert_time_units: bool = True, 
+                       sig_figures: int = 3):
         """
         Simulates the current model and plots the results if ``plot_results`` is True (default True). Parameters
         rate_constant and initial_concentrations can contain iterables. In this case, the model will be simulated
@@ -622,14 +736,18 @@ class PhotoKineticSymbolicModel:
             the iterable. It can contain more that one iterables, in this case, length of iterable arrays must 
             be the same.
         substitutions :
-            TODO
+            List/tuple of substitutions if used during steady state approximation. They have to occur in the same 
+            order as are saved in the model. Please, check the order in ``symbols['substitutions']`` attribute. 
+            Subsitutions can contain iterables (list, tuple, np.ndarray). In this case the model will be simulate
+            for each of the parameter in the iterable. It can contain more that one iterables, in this case,
+            length of iterable arrays must be the same.
         constant_compartments: list of strings
             If specified (default None), the values of these compartments will be constant and the value from
             initial_concentration array will be used. Constant compartments will not be plotted. If the SS 
             approximation was performed for the constant compartment, it will have not effect and the SS 
             solution will be used instead.
         t_max: 
-            Maximum time in the range of time points the model will be simulated for. Optional. Default 1e3.
+            Maximum time in seconds in the range of time points the model will be simulated for. Optional. Default 1e3 s.
         t_points: 
             Number of time points used to simulate the model for. Optional. Default 1000.
         flux: 
@@ -674,8 +792,11 @@ class PhotoKineticSymbolicModel:
             If True, rate constant, initial concentrations and epsilon and flux will be scaled by suitable factor
             (determined by the geometric mean of the initial concentrations). This can help to reduce numerical errors
             in the integrator. Optional. Default True.
-        auto_convert_units:
-            If True, units of concentrations and rate constants will be automatically converted to m, micro, nano, etc. units.
+        auto_convert_time_units:
+            If True, time will be converted to corresponding smaller or bigger units. Time unit will be denoted on x axis.
+        sig_figures : 
+            Number of significant figures the rate constants, initial concentrations and/or substitutions will be rounded to 
+            if displayed in the plot.
         """
         
         if len(self.symbols['equations']) == 0:
@@ -777,20 +898,30 @@ class PhotoKineticSymbolicModel:
         comps_cast = [comps[i] for i in idxs2plot]
         traces_cast = [self.C_tensor[:, i, :] for i in idxs2plot]
 
+        def format_rate_constant(i, j):
+            conc_unit = f'\\ {self.concentration_unit}^{{-{self._rate_constant_orders[j] - 1}}}' if self._rate_constant_orders[j] > 1 else ''
+            return f"{self.symbols['rate_constants'][j]}={format_number_latex(rates[i, j], sig_figures)}{conc_unit}\\ s^{{-1}}"
+
         # find what rate constants or initial concentrations are changing
         par_names = []
         for i in range(k):
             # https://docs.python.org/3/library/string.html#format-string-syntax
             # # option does not remove the trailing zeros from the output
-            text_rates = ', '.join([f"{self.symbols['rate_constants'][j]}={rates[i, j]:#.3g}" for j in idx_iter_rates])
-            text_subs = ', '.join([f"{self.symbols['substitutions'][j]}={subs[i, j]:#.3g}" for j in idx_subs])
-            text_init = ', '.join([f"[\\mathrm{{{comps[j]}}}]_0={init_c[i, j]:#.3g}" for j in idx_iter_init_c])
+            text_rates = ', '.join([format_rate_constant(i, j) for j in idx_iter_rates])
+            text_subs = ', '.join([f"{self.symbols['substitutions'][j]}={format_number_latex(subs[i, j], sig_figures)}" for j in idx_subs])
+            text_init = ', '.join([f"[\\mathrm{{{comps[j]}}}]_0={format_number_latex(init_c[i, j], sig_figures)}\\ {self.concentration_unit}" for j in idx_iter_init_c])
 
             # combine texts and remove empty entries (in case the the texts are empty)
             par_names.append('; '.join(filter(None, [text_rates, text_subs, text_init])))
 
         if not plot_results:
             return
+
+        times_scaled = times.copy()
+        t_unit = 's'
+        if auto_convert_time_units:
+            s_factor, t_unit = get_time_unit(t_max)
+            times_scaled *= s_factor
 
         # plot the results
         if plot_separately:
@@ -803,8 +934,8 @@ class PhotoKineticSymbolicModel:
             for i, (comp, trace, ax) in enumerate(zip(comps_cast, traces_cast, axes)):
                 for j in range(k):
                     label = '' if par_names[j] == '' else f'${par_names[j]}$'
-                    ax.plot(times, trace[j], label=label if i == 0 else '', lw=lw, color=cmap(j/trace.shape[0]))
-                ax.set_ylabel('Concentration')
+                    ax.plot(times_scaled, trace[j], label=label if i == 0 else '', lw=lw, color=cmap(j / trace.shape[0]))
+                ax.set_ylabel(f'c / {self.concentration_unit}')
                 if i == 0 and k > 1:
                     ax.legend(frameon=False, fontsize=legend_fontsize, labelspacing=legend_labelspacing)
                 ax.set_yscale(yscale)
@@ -813,7 +944,7 @@ class PhotoKineticSymbolicModel:
                 ax.tick_params(axis='both', which='minor', direction='in')
                 ax.xaxis.set_ticks_position('both')
                 ax.yaxis.set_ticks_position('both')
-            axes[-1].set_xlabel('Time')
+            axes[-1].set_xlabel(f'Time / ${t_unit}$')
 
         else:
             figsize = (figsize[0] , figsize[1] * k)
@@ -824,11 +955,11 @@ class PhotoKineticSymbolicModel:
 
                 for j, (comp, trace) in enumerate(zip(comps_cast, traces_cast)):
                     color = COLORS[j % len(COLORS)]
-                    ax.plot(times, trace[i], label=f'$\\mathrm{{{comp}}}$', lw=lw, color=color)
+                    ax.plot(times_scaled, trace[i], label=f'$\\mathrm{{{comp}}}$', lw=lw, color=color)
 
                 if i == k - 1:
-                    ax.set_xlabel('Time')
-                ax.set_ylabel('Concentration')
+                    ax.set_xlabel(f'Time / ${t_unit}$')
+                ax.set_ylabel(f'c / {self.concentration_unit}')
                 title = '' if par_names[i] == '' else f'${par_names[i]}$'
                 ax.set_title(title)
                 ax.set_yscale(yscale)
@@ -853,17 +984,10 @@ class PhotoKineticSymbolicModel:
                   f"rate: {rate}")  # {rate=} does not work in python 3.7 on colab
 
 
+
+
+
 if __name__ == '__main__':
-
-    model = """
-    ArO_2 --> Ar + ^1O_2             // k_1  # absorption and singlet state decay
-    ^1O_2 --> ^3O_2                  // k_d
-    # ^1O_2 + Ar --> Ar + ^3O_2         // k_{q,Ar}
-    # ^1O_2 + ArO_2 --> ArO_2 + ^3O_2     // k_{q,ArO_2}
-    ^1O_2 + S --> S + ^3O_2           // k_{q,S}
-    S + ^1O_2 -->                      // k_r
-    """
-
 
     # model = PhotoKineticSymbolicModel.from_text(model)
     # # print(model.print_text_model())
@@ -876,24 +1000,32 @@ if __name__ == '__main__':
     #                     constant_compartments=['^3O_2'], t_max=2e3, yscale='linear', scale=True,
     #                     plot_separately=False, cmap='plasma')
 
+    # text_model = """
+    # GS -hv-> ^1S --> GS  // k_s  # absorption and decay back to ground state
+    # ^1S --> P            // k_r  # formation of the photoproduct from the singlet state
+    # """
 
-    text_model = """
-    GS -hv-> ^1S --> GS  // k_s  # absorption and decay back to ground state
-    ^1S --> P            // k_r  # formation of the photoproduct from the singlet state
+    model = """
+    ArO_2 --> Ar + ^1O_2             // k_1  # absorption and singlet state decay
+    ^1O_2 --> ^3O_2                  // k_d
+    # ^1O_2 + Ar --> Ar + ^3O_2         // k_{q,Ar}
+    # ^1O_2 + ArO_2 --> ArO_2 + ^3O_2     // k_{q,ArO_2}
+    ^1O_2 + S --> S + ^3O_2           // k_{q,S}
+    S + ^1O_2 -->                      // k_r
     """
 
     # instantiate the model
-    model = PhotoKineticSymbolicModel.from_text(text_model)
+    model = PhotoKineticSymbolicModel.from_text(model)
     model.print_model()  # print the model
     model.pprint_equations()  # print the ODEs
     print('\n')
-
-    ks, kr = model.symbols['rate_constants']
-    phi_r, tau_r = symbols('phi_r, tau_r')
+    
+    # ks, kr = model.symbols['rate_constants']
+    # phi_r, tau_r = symbols('phi_r, tau_r')
 
 
     # perform the steady state approximation for singlet state
-    model.steady_state_approx(['^1S'], subs=[(kr / (ks+kr), phi_r), (ks+kr, 1/tau_r)])
+    # model.steady_state_approx(['^1S'], subs=[(kr / (ks+kr), phi_r), (ks+kr, 1/tau_r)])
 
     # text_model = """
     # A --> B --> C  // k_1 ; k_2
@@ -905,10 +1037,6 @@ if __name__ == '__main__':
     # # model.simulate_model([1, 0.5], [1, 0, 0], t_max=10, plot_separately=False)
     # # model.pprint_equations()
     # model.simulate_model([np.linspace(0.5, 1.5, 10), 0.5], [1, 0, 0], t_max=10, flux=1e-6, epsilon=1e5, plot_separately=True)
-
-
-
-
 
 
 

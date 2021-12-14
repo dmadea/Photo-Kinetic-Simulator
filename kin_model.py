@@ -783,10 +783,11 @@ class PhotoKineticSymbolicModel:
             # https://docs.python.org/3/library/string.html#format-string-syntax
             # # option does not remove the trailing zeros from the output
             text_rates = ', '.join([f"{self.symbols['rate_constants'][j]}={rates[i, j]:#.3g}" for j in idx_iter_rates])
+            text_subs = ', '.join([f"{self.symbols['substitutions'][j]}={subs[i, j]:#.3g}" for j in idx_subs])
             text_init = ', '.join([f"[\\mathrm{{{comps[j]}}}]_0={init_c[i, j]:#.3g}" for j in idx_iter_init_c])
 
             # combine texts and remove empty entries (in case the the texts are empty)
-            par_names.append('; '.join(filter(None, [text_rates, text_init])))
+            par_names.append('; '.join(filter(None, [text_rates, text_subs, text_init])))
 
         if not plot_results:
             return

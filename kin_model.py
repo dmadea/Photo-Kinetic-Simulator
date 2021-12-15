@@ -1,6 +1,6 @@
 
 from sympy import Function, solve, Eq, factor, simplify, Symbol, symbols, lambdify
-from IPython.display import display, Math
+from IPython.display import display, Math, Markdown
 import re
 
 import matplotlib.pyplot as plt
@@ -471,45 +471,78 @@ class PhotoKineticSymbolicModel:
 
     def print_model(self):
         """
-        Print the model in LaTeX format. Chooses the correct way of printing the model based 
-        on the environment (Jupyter notebook or Google colab).
+        Print the model in LaTeX format. Uses the align LaTeX environment.
         """
-
-        if IN_COLAB:
-            self.pprint_model_no_env()
-        else:
-            self.pprint_model_align_env()
-
-    def pprint_model_align_env(self):
-        """Pretty prints model. Uses the align LaTeX environment."""
+        # trick with Markdown https://stackoverflow.com/questions/48422762/is-it-possible-to-show-print-output-as-latex-in-jupyter-notebook
 
         latex_eq = ''
+        idxs = []  # iindexes of reversible reactions
 
-        for el in self.elem_reactions:
+        for i, el in enumerate(self.elem_reactions):
+            if i in idxs:
+                continue
+
             reactants = ' + '.join([f'\\mathrm{{{comp}}}' for comp in el['from_comp']])
             products = ' + '.join([f'\\mathrm{{{comp}}}' for comp in el['to_comp']])
 
-            r_name = el['rate_constant_name']
-
-            latex_eq += f'{reactants} &\\xrightarrow{{{r_name}}} {products} \\\\'
-
-        latex_eq = r'\begin{align}' + latex_eq + r'\end{align}'
-        display(Math(latex_eq))
-
-    def pprint_model_no_env(self):
-        """Pretty prints model. Does not use the math environment."""
-
-        # TODO -->  check for equilibrium reactions
-
-        for el in self.elem_reactions:
-            reactants = ' + '.join([f'\\mathrm{{{comp}}}' for comp in el['from_comp']])
-            products = ' + '.join([f'\\mathrm{{{comp}}}' for comp in el['to_comp']])
+            idx_rev = None
+            for j in range(i + 1, len(self.elem_reactions)):
+                if el['from_comp'] == self.elem_reactions[j]['to_comp'] and \
+                   el['to_comp'] == self.elem_reactions[j]['from_comp'] and \
+                   el['type'] == self.elem_reactions[j]['type']:
+                    # reversible reaction
+                    idx_rev = j
+                    idxs.append(j)
 
             r_name = el['rate_constant_name']
 
-            latex_eq = f'{reactants} \\xrightarrow{{{r_name}}} {products}'
+            if idx_rev:
+                latex_eq += rf"{reactants} &\xrightleftharpoons[{self.elem_reactions[idx_rev]['rate_constant_name']}]{{\hspace{{0.1cm}}{r_name}}}\hspace{{0.1cm}} {products} \\"
+            else:
+                latex_eq += rf'{reactants} &\xrightarrow{{{r_name}}} {products} \\'
 
-            display(Math(latex_eq))
+        latex_eq = rf"$$\begin{{align}} {latex_eq} \end{{align}}$$"
+        display(Markdown(latex_eq))
+
+    # def pprint_model(self, use_environment: bool = True):
+    #     """Pretty prints model. 
+        
+    #     Parameters
+    #     ----------
+    #     use_environment : 
+    #         If True, it will use the align LaTeX environment to print the model.
+    #     """
+        
+
+    # # def pprint_model_align_env(self):
+
+    # #     latex_eq = ''
+
+    # #     for el in self.elem_reactions:
+    # #         reactants = ' + '.join([f'\\mathrm{{{comp}}}' for comp in el['from_comp']])
+    # #         products = ' + '.join([f'\\mathrm{{{comp}}}' for comp in el['to_comp']])
+
+    # #         r_name = el['rate_constant_name']
+
+    # #         latex_eq += f'{reactants} &\\xrightarrow{{{r_name}}} {products} \\\\'
+
+    # #     latex_eq = r'\begin{align}' + latex_eq + r'\end{align}'
+    # #     display(Math(latex_eq))
+
+    # # def pprint_model_no_env(self):
+    # #     """Pretty prints model. Does not use the math environment."""
+
+    # #     # TODO -->  check for equilibrium reactions
+
+    # #     for el in self.elem_reactions:
+    # #         reactants = ' + '.join([f'\\mathrm{{{comp}}}' for comp in el['from_comp']])
+    # #         products = ' + '.join([f'\\mathrm{{{comp}}}' for comp in el['to_comp']])
+
+    # #         r_name = el['rate_constant_name']
+
+    # #         latex_eq = f'{reactants} \\xrightarrow{{{r_name}}} {products}'
+
+    # #         display(Math(latex_eq))
 
     def pprint_equations(self):
         """
@@ -543,8 +576,7 @@ class PhotoKineticSymbolicModel:
 
     def steady_state_approx(self, compartments: Union[List[str], Tuple[str]],
                             subs: Union[None, Iterable[tuple]] = None,
-                            print_solution: bool = True,
-                            factor: bool = True):
+                            print_solution: bool = True):
         """
         Performs the steady state approximation for the given species.
 
@@ -601,21 +633,21 @@ class PhotoKineticSymbolicModel:
         for comp, (var, expression) in zip(all_compartments, solution.items()):
             eq = Eq(var, expression)
 
-            if factor:
-                if subs:
-                    for old, new in subs:
-                        eq = eq.subs(old, new)
-                
-                eq = factor(simplify(eq), deep=True)
+            # if factor:
+            if subs:
+                for old, new in subs:
+                    eq = eq.subs(old, new)
+            
+            eq = factor(simplify(eq), deep=True)
 
             if subs:
                 for old, new in subs:
                     eq = eq.subs(old, new)
 
-            if factor:
-                eq = factor(simplify(eq), deep=True)
-            else: 
-                eq = simplify(eq)
+            # if factor:
+            eq = factor(simplify(eq), deep=True)
+            # else: 
+            #     eq = simplify(eq)
 
             # make the substitution of ugly factored J(1-10**-l*eps*c)
             if len(abs_el_r) > 0:
@@ -728,8 +760,8 @@ class PhotoKineticSymbolicModel:
                        initial_concentrations: Union[List, Tuple, np.ndarray],
                        substitutions: Union[None, List, Tuple, np.ndarray] = None, 
                        constant_compartments: Union[None, List[str], Tuple[str]] = None,
-                       t_max: Union[float, int] = 1e3, t_points: int = 1000, flux: float = 1e-8, l: float = 1,
-                       epsilon: float = 1e5, use_SS_approx: bool = True, ODE_solver: str = 'Radau', 
+                       t_max: Union[float, int] = 1e3, t_points: int = 1000, flux: Union[float, Iterable] = 1e-8,
+                       l: float = 1, epsilon: float = 1e5, use_SS_approx: bool = True, ODE_solver: str = 'Radau', 
                        plot_separately: bool = True,  figsize: Union[tuple, list] = (6, 3), yscale: str = 'linear',
                        cmap: str = 'plasma', lw: float = 2, legend_fontsize: int = 10, legend_labelspacing: float = 0,
                        filepath: Union[None, str] = None, dpi: int = 300, transparent: bool = False,
@@ -839,7 +871,10 @@ class PhotoKineticSymbolicModel:
         init_c, idx_iter_init_c = get_matrix(initial_concentrations)
         subs, idx_subs = get_matrix(substitutions)
 
-        k = max(rates.shape[0], init_c.shape[0], subs.shape[0])  # number of inner parameters in a all parameter arrays
+        iterable_flux = np.iterable(flux)
+        flux = np.asarray(flux) if iterable_flux else np.asarray([flux]) 
+        
+        k = max(rates.shape[0], init_c.shape[0], subs.shape[0], flux.shape[0])  # number of inner parameters in a all parameter arrays
         
         # tile the other array so the first dimension of both arrays is k
         if rates.shape[0] != k:
@@ -848,9 +883,11 @@ class PhotoKineticSymbolicModel:
             init_c = np.tile(init_c[0], (k, 1))
         if subs.shape[0] != k:
             subs = np.tile(subs[0], (k, 1))
+        if flux.shape[0] != k:
+            flux = np.tile(flux[0], k)
 
         self.C_tensor = None
-        times = np.linspace(0, t_max, int(t_points))
+        times = np.linspace(0, t_max, int(t_points), dtype=np.float64)
 
         # scale rate constants, flux, epsilon and initial_concentrations for less numerial errors in
         # the numerical integration
@@ -898,7 +935,7 @@ class PhotoKineticSymbolicModel:
             # numerically integrate
             # https://docs.scipy.org/doc/scipy/reference/generated/scipy.integrate.solve_ivp.html#scipy.integrate.solve_ivp
             sol = solve_ivp(dc_dt, (0, t_max), init_c_sc[i, idxs2simulate], method=ODE_solver, vectorized=False, dense_output=True,
-                    args=(rates_sc[i, :], subs[i, :], flux, l, epsilon))
+                    args=(rates_sc[i, :], subs[i, :], flux[i], l, epsilon))
 
             C[i, idxs2simulate, :] = sol.sol(times)  # evaluate at dense time points
 
@@ -907,7 +944,7 @@ class PhotoKineticSymbolicModel:
                 for comp, eq in self.last_SS_solution['SS_eqs'].items():
                     j = comps.index(comp)
                     f = lambdify(symbols, eq.rhs, 'numpy')
-                    C[i, j, :] = f(*rates_sc[i, :], *list(C[i]), *subs[i, :], flux, l, epsilon)
+                    C[i, j, :] = f(*rates_sc[i, :], *list(C[i]), *subs[i, :], flux[i], l, epsilon)
 
         # scale the traces back to correct values
         C *= coef
@@ -931,9 +968,10 @@ class PhotoKineticSymbolicModel:
             text_rates = ', '.join([format_rate_constant(i, j) for j in idx_iter_rates])
             text_subs = ', '.join([f"{self.symbols['substitutions'][j]}={format_number_latex(subs[i, j], sig_figures)}" for j in idx_subs])
             text_init = ', '.join([f"[\\mathrm{{{comps[j]}}}]_0={format_number_latex(init_c[i, j], sig_figures)}\\ {self.concentration_unit}" for j in idx_iter_init_c])
+            text_flux = f"J={format_number_latex(flux[i] * coef, sig_figures)}\\ {self.concentration_unit}\\ s^{{-1}}" if iterable_flux else ''
 
             # combine texts and remove empty entries (in case the the texts are empty)
-            par_names.append('; '.join(filter(None, [text_rates, text_subs, text_init])))
+            par_names.append('; '.join(filter(None, [text_rates, text_subs, text_init, text_flux])))
 
         if not plot_results:
             return
@@ -1058,9 +1096,17 @@ if __name__ == '__main__':
     subs=[(1/(ks+kr), tau_F), (kr * tau_F, phi_r)]
 
     # perform the steady state approximation for singlet state
-    model.steady_state_approx(['^1S'], subs=subs)
+    model.steady_state_approx(['^1S'], subs=subs, print_solution=False)
 
-    print(model.symbols['substitutions'])
+    rate_constants = [ 1e9, 1e8 ]  # in the order of k_s, k_r
+    initial_concentrations = [ 2e-5, 0, 0 ] # in the order of GS, ^1S, P
+    subs = [ 1e8/(1e9+1e8), 1/(1e9 + 1e8) ]  # in the order of tau_F, phi_r
+
+    # simulate the model, flux is the 'concentration of photons', it is the J parameter
+    # l is the length of the cuvette = 1 and epsilon = 1e5 is molar abs. coefficient
+    # as we start with c=2e-5 M, the initial absorbance A = 2
+    model.simulate_model(rate_constants, initial_concentrations, substitutions=subs, t_max=600, flux=np.linspace(1e-7, 1e-5, 10), l=1, epsilon=1e5, plot_separately=True)
+
     
     # ks, kr = model.symbols['rate_constants']
     # phi_r, tau_r = symbols('phi_r, tau_r')

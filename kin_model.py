@@ -499,6 +499,8 @@ class PhotoKineticSymbolicModel:
     def pprint_model_no_env(self):
         """Pretty prints model. Does not use the math environment."""
 
+        # TODO -->  check for equilibrium reactions
+
         for el in self.elem_reactions:
             reactants = ' + '.join([f'\\mathrm{{{comp}}}' for comp in el['from_comp']])
             products = ' + '.join([f'\\mathrm{{{comp}}}' for comp in el['to_comp']])
@@ -541,7 +543,8 @@ class PhotoKineticSymbolicModel:
 
     def steady_state_approx(self, compartments: Union[List[str], Tuple[str]],
                             subs: Union[None, Iterable[tuple]] = None,
-                            print_solution: bool = True):
+                            print_solution: bool = True,
+                            factor: bool = True):
         """
         Performs the steady state approximation for the given species.
 
@@ -588,23 +591,41 @@ class PhotoKineticSymbolicModel:
             free_symbols = set()
             for old, new in subs:
                 free_symbols = free_symbols.union(new.free_symbols)
-            self.symbols['substitutions'] = list(free_symbols)
+            # sort the symbols by their name
+            self.symbols['substitutions'] = sorted(free_symbols, key=lambda symbol: symbol.name)
+
+        # prepare the J(1-10**-l*eps*c) substitution
+        abs_el_r = list(filter(lambda el: el['type'] == 'absorption', self.elem_reactions))
 
         # the order of solutions is the same as the input
         for comp, (var, expression) in zip(all_compartments, solution.items()):
             eq = Eq(var, expression)
-            
-            if subs:
-                for old, new in subs:
-                    eq = eq.subs(old, new)
-            
-            eq = factor(simplify(eq), deep=True)
+
+            if factor:
+                if subs:
+                    for old, new in subs:
+                        eq = eq.subs(old, new)
+                
+                eq = factor(simplify(eq), deep=True)
 
             if subs:
                 for old, new in subs:
                     eq = eq.subs(old, new)
 
-            eq = factor(simplify(eq), deep=True)
+            if factor:
+                eq = factor(simplify(eq), deep=True)
+            else: 
+                eq = simplify(eq)
+
+            # make the substitution of ugly factored J(1-10**-l*eps*c)
+            if len(abs_el_r) > 0:
+                idx = all_compartments.index(abs_el_r[0]['from_comp'][0])
+                c = self.symbols['compartments'][idx]
+                eps = self.symbols['epsilon']
+                l = self.symbols['l']
+                old = 10 ** (-l * eps * c) * self.symbols['flux'] * (10 ** (l * eps * c) - 1)
+                new = self.symbols['flux'] * (1 - 10 ** (-l * eps * c))
+                eq = eq.subs(old, new)
 
             if comp in compartments:
                 self.last_SS_solution['SS_eqs'][comp] = eq
@@ -698,9 +719,9 @@ class PhotoKineticSymbolicModel:
 
         for f, rhs in zip(self.symbols['compartments'], sympy_rhss):
             # construct differential equation
-            rhs_factored = factor(rhs, deep=True)
+            # rhs_factored = factor(rhs, deep=True)
 
-            _eq = Eq(f.diff(self.symbols['time']), rhs_factored)
+            _eq = Eq(f.diff(self.symbols['time']), rhs)
             self.symbols['equations'].append(_eq)
 
     def simulate_model(self, rate_constants: Union[List, Tuple, np.ndarray],
@@ -899,7 +920,7 @@ class PhotoKineticSymbolicModel:
         traces_cast = [self.C_tensor[:, i, :] for i in idxs2plot]
 
         def format_rate_constant(i, j):
-            conc_unit = f'\\ {self.concentration_unit}^{{-{self._rate_constant_orders[j] - 1}}}' if self._rate_constant_orders[j] > 1 else ''
+            conc_unit = f'\\ {self.concentration_unit}^{{{1 - self._rate_constant_orders[j]}}}' if self._rate_constant_orders[j] > 1 else ''
             return f"{self.symbols['rate_constants'][j]}={format_number_latex(rates[i, j], sig_figures)}{conc_unit}\\ s^{{-1}}"
 
         # find what rate constants or initial concentrations are changing
@@ -984,9 +1005,6 @@ class PhotoKineticSymbolicModel:
                   f"rate: {rate}")  # {rate=} does not work in python 3.7 on colab
 
 
-
-
-
 if __name__ == '__main__':
 
     # model = PhotoKineticSymbolicModel.from_text(model)
@@ -1005,24 +1023,47 @@ if __name__ == '__main__':
     # ^1S --> P            // k_r  # formation of the photoproduct from the singlet state
     # """
 
-    model = """
-    ArO_2 --> Ar + ^1O_2             // k_1  # absorption and singlet state decay
-    ^1O_2 --> ^3O_2                  // k_d
-    # ^1O_2 + Ar --> Ar + ^3O_2         // k_{q,Ar}
-    # ^1O_2 + ArO_2 --> ArO_2 + ^3O_2     // k_{q,ArO_2}
-    ^1O_2 + S --> S + ^3O_2           // k_{q,S}
-    S + ^1O_2 -->                      // k_r
+    # model = """
+    # ArO_2 --> Ar + ^1O_2             // k_1  # absorption and singlet state decay
+    # ^1O_2 --> ^3O_2                  // k_d
+    # # ^1O_2 + Ar --> Ar + ^3O_2         // k_{q,Ar}
+    # # ^1O_2 + ArO_2 --> ArO_2 + ^3O_2     // k_{q,ArO_2}
+    # ^1O_2 + S --> S + ^3O_2           // k_{q,S}
+    # S + ^1O_2 -->                      // k_r
+    # """
+
+    # # instantiate the model
+    # model = PhotoKineticSymbolicModel.from_text(model)
+    # model.print_model()  # print the model
+    # model.pprint_equations()  # print the ODEs
+    # print('\n')
+
+    text_model = """
+    GS -hv-> ^1S --> GS  // k_s  # absorption and decay back to ground state
+    ^1S --> P            // k_r  # formation of the photoproduct from the singlet state
     """
 
     # instantiate the model
-    model = PhotoKineticSymbolicModel.from_text(model)
+    model = PhotoKineticSymbolicModel.from_text(text_model)
     model.print_model()  # print the model
     model.pprint_equations()  # print the ODEs
-    print('\n')
+
+    ks, kr = model.symbols['rate_constants']
+    phi_r, tau_F = symbols('\\phi_r, tau_F')
+
+    print('\nWe make the following substitutions:')
+
+    # Fluorescence lifetime is inverse of total decay rate of the singlet state
+    # Quantum yield of the photoreaction is then k_r * fluorescence lifetime
+    subs=[(1/(ks+kr), tau_F), (kr * tau_F, phi_r)]
+
+    # perform the steady state approximation for singlet state
+    model.steady_state_approx(['^1S'], subs=subs)
+
+    print(model.symbols['substitutions'])
     
     # ks, kr = model.symbols['rate_constants']
     # phi_r, tau_r = symbols('phi_r, tau_r')
-
 
     # perform the steady state approximation for singlet state
     # model.steady_state_approx(['^1S'], subs=[(kr / (ks+kr), phi_r), (ks+kr, 1/tau_r)])

@@ -1,5 +1,5 @@
 
-from sympy import Function, solve, Eq, factor, simplify, Symbol, symbols, lambdify
+from sympy import Function, solve, Eq, factor, simplify, Symbol, symbols, lambdify, pprint, init_printing
 from IPython.display import display, Math, Markdown
 import re
 
@@ -477,7 +477,7 @@ class PhotoKineticSymbolicModel:
 
         latex_eq = ''
         idxs = []  # iindexes of reversible reactions
-
+        eqs = []
         for i, el in enumerate(self.elem_reactions):
             if i in idxs:
                 continue
@@ -497,12 +497,13 @@ class PhotoKineticSymbolicModel:
             r_name = el['rate_constant_name']
 
             if idx_rev:
-                latex_eq += rf"{reactants} &\xrightleftharpoons[{self.elem_reactions[idx_rev]['rate_constant_name']}]{{\hspace{{0.1cm}}{r_name}}}\hspace{{0.1cm}} {products} \\"
+                eqs.append(f"{reactants} &\\xrightleftharpoons[{self.elem_reactions[idx_rev]['rate_constant_name']}]{{\\hspace{{0.1cm}}{r_name}}}\\hspace{{0.1cm}} {products}")
             else:
-                latex_eq += rf'{reactants} &\xrightarrow{{{r_name}}} {products} \\'
-
-        latex_eq = rf"$$\begin{{align}} {latex_eq} \end{{align}}$$"
-        display(Markdown(latex_eq))
+                eqs.append(f"{reactants} &\\xrightarrow{{{r_name}}} {products}")
+        sep = '\\\\\n'
+        latex_eq = f"$$\\begin{{align}} {sep.join(eqs)} \\end{{align}}$$"
+        return latex_eq
+        # display(Markdown(latex_eq))
 
     # def pprint_model(self, use_environment: bool = True):
     #     """Pretty prints model. 
@@ -1086,26 +1087,26 @@ if __name__ == '__main__':
     model.print_model()  # print the model
     model.pprint_equations()  # print the ODEs
 
-    ks, kr = model.symbols['rate_constants']
-    phi_r, tau_F = symbols('\\phi_r, tau_F')
+    # ks, kr = model.symbols['rate_constants']
+    # phi_r, tau_F = symbols('\\phi_r, tau_F')
 
-    print('\nWe make the following substitutions:')
+    # print('\nWe make the following substitutions:')
 
-    # Fluorescence lifetime is inverse of total decay rate of the singlet state
-    # Quantum yield of the photoreaction is then k_r * fluorescence lifetime
-    subs=[(1/(ks+kr), tau_F), (kr * tau_F, phi_r)]
+    # # Fluorescence lifetime is inverse of total decay rate of the singlet state
+    # # Quantum yield of the photoreaction is then k_r * fluorescence lifetime
+    # subs=[(1/(ks+kr), tau_F), (kr * tau_F, phi_r)]
 
-    # perform the steady state approximation for singlet state
-    model.steady_state_approx(['^1S'], subs=subs, print_solution=False)
+    # # perform the steady state approximation for singlet state
+    # model.steady_state_approx(['^1S'], subs=subs, print_solution=False)
 
-    rate_constants = [ 1e9, 1e8 ]  # in the order of k_s, k_r
-    initial_concentrations = [ 2e-5, 0, 0 ] # in the order of GS, ^1S, P
-    subs = [ 1e8/(1e9+1e8), 1/(1e9 + 1e8) ]  # in the order of tau_F, phi_r
+    # rate_constants = [ 1e9, 1e8 ]  # in the order of k_s, k_r
+    # initial_concentrations = [ 2e-5, 0, 0 ] # in the order of GS, ^1S, P
+    # subs = [ 1e8/(1e9+1e8), 1/(1e9 + 1e8) ]  # in the order of tau_F, phi_r
 
-    # simulate the model, flux is the 'concentration of photons', it is the J parameter
-    # l is the length of the cuvette = 1 and epsilon = 1e5 is molar abs. coefficient
-    # as we start with c=2e-5 M, the initial absorbance A = 2
-    model.simulate_model(rate_constants, initial_concentrations, substitutions=subs, t_max=600, flux=np.linspace(1e-7, 1e-5, 10), l=1, epsilon=1e5, plot_separately=True)
+    # # simulate the model, flux is the 'concentration of photons', it is the J parameter
+    # # l is the length of the cuvette = 1 and epsilon = 1e5 is molar abs. coefficient
+    # # as we start with c=2e-5 M, the initial absorbance A = 2
+    # model.simulate_model(rate_constants, initial_concentrations, substitutions=subs, t_max=600, flux=np.linspace(1e-7, 1e-5, 10), l=1, epsilon=1e5, plot_separately=True)
 
     
     # ks, kr = model.symbols['rate_constants']

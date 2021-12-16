@@ -473,6 +473,12 @@ class PhotoKineticSymbolicModel:
         """
         Print the model in LaTeX format. Uses the align LaTeX environment.
         """
+        # def _rev_reaction_latex(reactants, products, forward_rate, backward_rate):
+        #     if IN_COLAB:
+        #         return f"{reactants} \\overset{{{forward_rate}}}{{\\underset{backward_rate}\\rightleftharpoons}} {products}"
+        #     else:
+                # pass
+
         # trick with Markdown https://stackoverflow.com/questions/48422762/is-it-possible-to-show-print-output-as-latex-in-jupyter-notebook
 
         latex_eq = ''
@@ -497,7 +503,9 @@ class PhotoKineticSymbolicModel:
             r_name = el['rate_constant_name']
 
             if idx_rev:
-                eqs.append(f"{reactants} &\\xrightleftharpoons[{self.elem_reactions[idx_rev]['rate_constant_name']}]{{\\hspace{{0.1cm}}{r_name}}}\\hspace{{0.1cm}} {products}")
+                # \xrightleftharpoons does not work in Colab and Jupyter :(
+                # eqs.append(f"{reactants} &\\xrightleftharpoons[{self.elem_reactions[idx_rev]['rate_constant_name']}]{{\\hspace{{0.1cm}}{r_name}}}\\hspace{{0.1cm}} {products}")
+                eqs.append(f"{reactants}\\ &\\overset{{{r_name}}}{{\\underset{{{self.elem_reactions[idx_rev]['rate_constant_name']}}}\\rightleftharpoons}}\\ {products}")
             else:
                 eqs.append(f"{reactants} &\\xrightarrow{{{r_name}}} {products}")
         sep = '\\\\\n'

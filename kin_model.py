@@ -501,9 +501,8 @@ class PhotoKineticSymbolicModel:
             else:
                 eqs.append(f"{reactants} &\\xrightarrow{{{r_name}}} {products}")
         sep = '\\\\\n'
-        latex_eq = f"$$\\begin{{align}} {sep.join(eqs)} \\end{{align}}$$"
-        return latex_eq
-        # display(Markdown(latex_eq))
+        latex_eq = f"$$\\begin{{align*}} {sep.join(eqs)} \\end{{align*}}$$"
+        display(Markdown(latex_eq))
 
     # def pprint_model(self, use_environment: bool = True):
     #     """Pretty prints model. 
@@ -1084,8 +1083,8 @@ if __name__ == '__main__':
 
     # instantiate the model
     model = PhotoKineticSymbolicModel.from_text(text_model)
-    model.print_model()  # print the model
-    model.pprint_equations()  # print the ODEs
+    print(model.print_model())  # print the model
+    # model.pprint_equations()  # print the ODEs
 
     # ks, kr = model.symbols['rate_constants']
     # phi_r, tau_F = symbols('\\phi_r, tau_F')

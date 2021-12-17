@@ -773,7 +773,7 @@ class PhotoKineticSymbolicModel:
                        plot_separately: bool = True,  figsize: Union[tuple, list] = (6, 3), yscale: str = 'linear',
                        cmap: str = 'plasma', lw: float = 2, legend_fontsize: int = 10, legend_labelspacing: float = 0,
                        filepath: Union[None, str] = None, dpi: int = 300, transparent: bool = False,
-                       plot_results: bool = True, scale: bool = True, auto_convert_time_units: bool = True, 
+                       plot_results: bool = True, rescale: bool = True, auto_convert_time_units: bool = True, 
                        sig_figures: int = 3, precise_simulation: bool = False):
         """
         Simulates the current model and plots the results if ``plot_results`` is True (default True). Parameters
@@ -849,7 +849,7 @@ class PhotoKineticSymbolicModel:
             If True, the saved image will be transparent. Optional. Default False.
         plot_results: 
             If True, the result will be plotted. Optional. Default True.
-        scale: 
+        rescale: 
             If True, rate constant, initial concentrations and epsilon and flux will be scaled by suitable factor
             (determined by the geometric mean of the initial concentrations). This can help to reduce numerical errors
             in the integrator. Optional. Default True.
@@ -910,7 +910,7 @@ class PhotoKineticSymbolicModel:
         coef = 1
         init_c_sc = init_c.copy()
         rates_sc = rates.copy()
-        if scale:
+        if rescale:
             # scaling coefficient, calculate it as geometric mean from non-zero initial concentrations
             coef = gmean(init_c[init_c > 0])  
             # print(coef)

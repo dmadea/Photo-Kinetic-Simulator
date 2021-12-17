@@ -1,5 +1,5 @@
 
-from sympy import Function, solve, Eq, factor, simplify, Symbol, symbols, lambdify, pprint, init_printing
+from sympy import Function, solve, Eq, factor, simplify, Symbol, symbols, lambdify, pprint, init_printing, Add
 from IPython.display import display, Math, Markdown
 import re
 
@@ -774,7 +774,7 @@ class PhotoKineticSymbolicModel:
                        cmap: str = 'plasma', lw: float = 2, legend_fontsize: int = 10, legend_labelspacing: float = 0,
                        filepath: Union[None, str] = None, dpi: int = 300, transparent: bool = False,
                        plot_results: bool = True, scale: bool = True, auto_convert_time_units: bool = True, 
-                       sig_figures: int = 3):
+                       sig_figures: int = 3, precise_simulation: bool = False):
         """
         Simulates the current model and plots the results if ``plot_results`` is True (default True). Parameters
         rate_constant and initial_concentrations can contain iterables. In this case, the model will be simulated
@@ -873,14 +873,22 @@ class PhotoKineticSymbolicModel:
         assert len(initial_concentrations) == n, "Length of initial_concentrations must match the number of compartments."
         assert len(rate_constants) == n_rates, "Length of rate_constants must match the number of rate constants."
 
+        # in windows, longdouble is just float64, so this will not have an effect
+        # https://stackoverflow.com/questions/29820829/cannot-use-128bit-float-in-python-on-64bit-architecture
+        dtype = np.longdouble if precise_simulation else np.float64
+
         # shape of matrices are k x l where k is number of parameters within the array to simulated
         # and l number of parameters (n_rates or n)
         rates, idx_iter_rates = get_matrix(rate_constants)
         init_c, idx_iter_init_c = get_matrix(initial_concentrations)
         subs, idx_subs = get_matrix(substitutions)
 
+        rates = np.asarray(rates, dtype=dtype)
+        init_c = np.asarray(init_c, dtype=dtype)
+        subs = np.asarray(subs, dtype=dtype)
+
         iterable_flux = np.iterable(flux)
-        flux = np.asarray(flux) if iterable_flux else np.asarray([flux]) 
+        flux = np.asarray(flux, dtype=dtype) if iterable_flux else np.asarray([flux], dtype=dtype) 
         
         k = max(rates.shape[0], init_c.shape[0], subs.shape[0], flux.shape[0])  # number of inner parameters in a all parameter arrays
         
@@ -895,7 +903,7 @@ class PhotoKineticSymbolicModel:
             flux = np.tile(flux[0], k)
 
         self.C_tensor = None
-        times = np.linspace(0, t_max, int(t_points), dtype=np.float64)
+        times = np.linspace(0, t_max, int(t_points), dtype=dtype)
 
         # scale rate constants, flux, epsilon and initial_concentrations for less numerial errors in
         # the numerical integration
@@ -910,14 +918,12 @@ class PhotoKineticSymbolicModel:
             epsilon *= coef
             flux /= coef
             # second and higher orders needs to be appropriately scaled, by coef ^ (rate order - 1)
-            rates_sc *= coef ** (np.asarray(self._rate_constant_orders, dtype=np.float64) - 1)
+            rates_sc *= coef ** (np.asarray(self._rate_constant_orders, dtype=dtype) - 1)
 
         symbols = self.symbols['rate_constants'] + self.symbols['compartments'] + self.symbols['substitutions'] + \
                   [self.symbols['flux'], self.symbols['l'], self.symbols['epsilon']]
 
         sym_eqs = list(self.last_SS_solution['diff_eqs'].values()) if use_SS_approx else self.symbols['equations']
-
-        d_funcs = list(map(lambda eq: lambdify(symbols, eq.rhs, 'numpy'), sym_eqs))
 
         # those compartments that will be simulated numerically
         idxs2simulate = list(map(comps.index, self.last_SS_solution['diff_eqs'].keys())) if use_SS_approx else list(np.arange(n, dtype=int))
@@ -928,14 +934,35 @@ class PhotoKineticSymbolicModel:
             idxs_constant = map(comps.index, filter(lambda c: c in comps, constant_compartments))
             idxs_constant_cast = list(map(idxs2simulate.index, filter(lambda c: c in idxs2simulate, idxs_constant)))
 
-        def dc_dt(t, c, rates, subs, flux, l, epsilon):
-            _c = np.empty(n)  # need to cast the concentations to have the original size of the compartments
-            _c[idxs2simulate] = c
+        if precise_simulation:
+            d_funcs = []
+            for eq in sym_eqs:
+                d_funcs.append(list(map(lambda term: lambdify(symbols, term, 'numpy'), Add.make_args(eq.rhs))))
 
-            solution = np.asarray([f(*rates, *_c, *subs, flux, l, epsilon) for f in d_funcs])
-            solution[idxs_constant_cast] = 0  # set the change of constant compartments to zero
+            def dc_dt(t, c, rates, subs, flux, l, epsilon):
+                _c = np.empty(n)  # need to cast the concentations to have the original size of the compartments
+                _c[idxs2simulate] = c
 
-            return solution
+                solution = np.empty(len(d_funcs))
+                for i, lambd_list in enumerate(d_funcs):
+                    ev_terms = [f(*rates, *_c, *subs, flux, l, epsilon) for f in lambd_list]
+                    # sum the sorted terms from lowest to highest
+                    ev_terms.sort(key=lambda value: abs(value))
+                    solution[i] = sum(ev_terms)
+
+                solution[idxs_constant_cast] = 0  # set the change of constant compartments to zero
+
+                return solution                
+        else:
+            d_funcs = list(map(lambda eq: lambdify(symbols, eq.rhs, 'numpy'), sym_eqs))
+            def dc_dt(t, c, rates, subs, flux, l, epsilon):
+                _c = np.empty(n)  # need to cast the concentations to have the original size of the compartments
+                _c[idxs2simulate] = c
+
+                solution = np.asarray([f(*rates, *_c, *subs, flux, l, epsilon) for f in d_funcs])
+                solution[idxs_constant_cast] = 0  # set the change of constant compartments to zero
+
+                return solution
 
         C = np.empty((k, n, times.shape[0]))
 
@@ -1092,28 +1119,29 @@ if __name__ == '__main__':
     # instantiate the model
     model = PhotoKineticSymbolicModel.from_text(text_model)
     print(model.print_model())  # print the model
-    # model.pprint_equations()  # print the ODEs
+    model.pprint_equations()  # print the ODEs
 
-    # ks, kr = model.symbols['rate_constants']
-    # phi_r, tau_F = symbols('\\phi_r, tau_F')
+    ks, kr = model.symbols['rate_constants']
+    phi_r, tau_F = symbols('\\phi_r, \\tau_F')
 
-    # print('\nWe make the following substitutions:')
+    print('\nWe make the following substitutions:')
 
-    # # Fluorescence lifetime is inverse of total decay rate of the singlet state
-    # # Quantum yield of the photoreaction is then k_r * fluorescence lifetime
-    # subs=[(1/(ks+kr), tau_F), (kr * tau_F, phi_r)]
+    # Fluorescence lifetime is inverse of total decay rate of the singlet state
+    # Quantum yield of the photoreaction is then k_r * fluorescence lifetime
+    subs=[(1/(ks+kr), tau_F), (kr * tau_F, phi_r)]
 
-    # # perform the steady state approximation for singlet state
+    # perform the steady state approximation for singlet state
     # model.steady_state_approx(['^1S'], subs=subs, print_solution=False)
 
-    # rate_constants = [ 1e9, 1e8 ]  # in the order of k_s, k_r
-    # initial_concentrations = [ 2e-5, 0, 0 ] # in the order of GS, ^1S, P
-    # subs = [ 1e8/(1e9+1e8), 1/(1e9 + 1e8) ]  # in the order of tau_F, phi_r
+    rate_constants = [ 1e9, 1e8 ]  # in the order of k_s, k_r
+    initial_concentrations = [ 2e-5, 0, 0 ] # in the order of GS, ^1S, P
+    subs = [ 1e8/(1e9+1e8), 1/(1e9 + 1e8) ]  # in the order of tau_F, phi_r
 
-    # # simulate the model, flux is the 'concentration of photons', it is the J parameter
-    # # l is the length of the cuvette = 1 and epsilon = 1e5 is molar abs. coefficient
-    # # as we start with c=2e-5 M, the initial absorbance A = 2
-    # model.simulate_model(rate_constants, initial_concentrations, substitutions=subs, t_max=600, flux=np.linspace(1e-7, 1e-5, 10), l=1, epsilon=1e5, plot_separately=True)
+    # simulate the model, flux is the 'concentration of photons', it is the J parameter
+    # l is the length of the cuvette = 1 and epsilon = 1e5 is molar abs. coefficient
+    # as we start with c=2e-5 M, the initial absorbance A = 2
+    model.simulate_model(rate_constants, initial_concentrations, 
+     t_max=600, flux=np.linspace(1e-7, 1e-5, 10), l=1, epsilon=1e5, plot_separately=True, precise_simulation=True)
 
     
     # ks, kr = model.symbols['rate_constants']

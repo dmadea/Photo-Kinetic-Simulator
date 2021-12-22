@@ -1,1 +1,3 @@
 # Photo-Kinetic-Simulator
+
+This Jupyter-based simulator allows for symbolic derivation of differential equations from simple text-based input. Steady state approximations for selected species can be easily performed. Finally, it allows for simulatin of the model for various input parameters (rate constant, initial concentrations). [Google Colab](https://colab.research.google.com/github/dmadea/Photo-Kinetic-Simulator/blob/main/Simulator.ipynb) version can be accessed online and there is no need to install [python](https://www.python.org/).s

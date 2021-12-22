@@ -128,7 +128,6 @@ def format_number_latex(number: float, sig_figures: int = 3) -> str:
     return formatted_num
 
 
-
 def get_time_unit(time: float) -> Tuple[float, str]:
     """
     Finds the nearest unit scale and returns the scaling factor
@@ -295,13 +294,15 @@ class PhotoKineticSymbolicModel:
         self.scheme = ""
 
         self.symbols = dict(compartments=[],
-                            equations=[],
+                            equations=[],  # contains diff equations
+                            equations_prime=[], # contains diff equations with substitution of J' = J(1 - 10 ** -l*eps*c)
                             rate_constants=[],
                             time=None,
-                            flux=None, 
+                            flux=None,    # J
+                            flux_prime=None,  # J'
                             l=None,
                             epsilon=None,
-                            substitutions=[])
+                            substitutions=[])  # contains the symbols used for substitutions
 
         # orders of the rate constants in the model
         self._rate_constant_orders = []
@@ -469,27 +470,25 @@ class PhotoKineticSymbolicModel:
 
         self.elem_reactions.append(el)
 
-    def print_model(self):
+    def print_model(self, force_use_environment: bool = False ):
         """
         Print the model in LaTeX format. Uses the align LaTeX environment.
         """
-        # def _rev_reaction_latex(reactants, products, forward_rate, backward_rate):
-        #     if IN_COLAB:
-        #         return f"{reactants} \\overset{{{forward_rate}}}{{\\underset{backward_rate}\\rightleftharpoons}} {products}"
-        #     else:
-                # pass
-
         # trick with Markdown https://stackoverflow.com/questions/48422762/is-it-possible-to-show-print-output-as-latex-in-jupyter-notebook
+
+        force_use_environment = not IN_COLAB or force_use_environment
 
         latex_eq = ''
         idxs = []  # iindexes of reversible reactions
         eqs = []
+
+        and_symbol = '&' if force_use_environment else ''
         for i, el in enumerate(self.elem_reactions):
             if i in idxs:
                 continue
 
-            reactants = ' + '.join([f'\\mathrm{{{comp}}}' for comp in el['from_comp']])
-            products = ' + '.join([f'\\mathrm{{{comp}}}' for comp in el['to_comp']])
+            reactants = ' + '.join(map(lambda comp: r'\mathrm{%s}' % comp, el['from_comp']))
+            products = ' + '.join(map(lambda comp: r'\mathrm{%s}' % comp, el['to_comp']))
 
             idx_rev = None
             for j in range(i + 1, len(self.elem_reactions)):
@@ -500,17 +499,23 @@ class PhotoKineticSymbolicModel:
                     idx_rev = j
                     idxs.append(j)
 
-            r_name = el['rate_constant_name']
+            forward_rate = el['rate_constant_name']
 
             if idx_rev:
                 # \xrightleftharpoons does not work in Colab and Jupyter :(
                 # eqs.append(f"{reactants} &\\xrightleftharpoons[{self.elem_reactions[idx_rev]['rate_constant_name']}]{{\\hspace{{0.1cm}}{r_name}}}\\hspace{{0.1cm}} {products}")
-                eqs.append(f"{reactants}\\ &\\overset{{{r_name}}}{{\\underset{{{self.elem_reactions[idx_rev]['rate_constant_name']}}}\\rightleftharpoons}}\\ {products}")
+                backward_rate = self.elem_reactions[idx_rev]['rate_constant_name']
+                eqs.append(r"%s\ %s\overset{%s}{\underset{%s}\rightleftharpoons}\ %s" % (reactants, and_symbol, forward_rate, backward_rate, products))
             else:
-                eqs.append(f"{reactants} &\\xrightarrow{{{r_name}}} {products}")
-        sep = '\\\\\n'
-        latex_eq = f"$$\\begin{{align*}} {sep.join(eqs)} \\end{{align*}}$$"
-        display(Markdown(latex_eq))
+                eqs.append(r"%s %s\xrightarrow{%s} %s" % (reactants, and_symbol, forward_rate, products))
+
+            if not force_use_environment:
+                display(Math(eqs[-1]))
+            
+        if force_use_environment:
+            sep = '\\\\\n'
+            latex_eq = f"\\begin{{align*}} {sep.join(eqs)} \\end{{align*}}"
+            display(Math(latex_eq))
 
     # def pprint_model(self, use_environment: bool = True):
     #     """Pretty prints model. 
@@ -552,7 +557,7 @@ class PhotoKineticSymbolicModel:
 
     # #         display(Math(latex_eq))
 
-    def pprint_equations(self):
+    def pprint_equations(self, display_primed: bool = False):
         """
         Pretty prints the equations.
         """
@@ -560,11 +565,9 @@ class PhotoKineticSymbolicModel:
         if self.symbols['equations'] is None:
             return
 
-        for eq in self.symbols['equations']:
-            # _eq = eq
-            # if subs:
-            #     for old, new in subs:
-            #         _eq = _eq.subs(old, new)
+        eqs = self.symbols['equations_prime'] if display_primed else self.symbols['equations']
+
+        for eq in eqs:
             display(eq)
 
     def get_compartments(self) -> list:
@@ -612,7 +615,7 @@ class PhotoKineticSymbolicModel:
 
         all_compartments = self.get_compartments()
 
-        for comp, eq, f in zip(all_compartments, self.symbols['equations'], self.symbols['compartments']):
+        for comp, eq, f in zip(all_compartments, self.symbols['equations_prime'], self.symbols['compartments']):
             if comp in compartments:  # use SS approximation
                 eq2solve.append(Eq(eq.rhs, 0))
                 variables.append(f)
@@ -637,35 +640,31 @@ class PhotoKineticSymbolicModel:
         # prepare the J(1-10**-l*eps*c) substitution
         abs_el_r = list(filter(lambda el: el['type'] == 'absorption', self.elem_reactions))
 
+        if len(abs_el_r) > 0:
+            idx = all_compartments.index(abs_el_r[0]['from_comp'][0])
+            c = self.symbols['compartments'][idx]
+            flux = self.symbols['flux'] * (1 - 10 ** (-self.symbols['l'] * self.symbols['epsilon'] * c))
+
         # the order of solutions is the same as the input
-        for comp, (var, expression) in zip(all_compartments, solution.items()):
-            eq = Eq(var, expression)
-
-            # if factor:
+        for comp, (var, expr) in zip(all_compartments, solution.items()):
+            # make substitutions
             if subs:
                 for old, new in subs:
-                    eq = eq.subs(old, new)
-            
-            eq = factor(simplify(eq), deep=True)
+                    expr = expr.subs(old, new)
 
+            # simplify and factor
+            expr = factor(simplify(expr))
+
+            # make substitutions again, but now on factored equations
             if subs:
                 for old, new in subs:
-                    eq = eq.subs(old, new)
+                    expr = expr.subs(old, new)
 
-            # if factor:
-            eq = factor(simplify(eq), deep=True)
-            # else: 
-            #     eq = simplify(eq)
-
-            # make the substitution of ugly factored J(1-10**-l*eps*c)
+            # substitute J' for J(1 - 10** -l*eps*c)
             if len(abs_el_r) > 0:
-                idx = all_compartments.index(abs_el_r[0]['from_comp'][0])
-                c = self.symbols['compartments'][idx]
-                eps = self.symbols['epsilon']
-                l = self.symbols['l']
-                old = 10 ** (-l * eps * c) * self.symbols['flux'] * (10 ** (l * eps * c) - 1)
-                new = self.symbols['flux'] * (1 - 10 ** (-l * eps * c))
-                eq = eq.subs(old, new)
+                expr = expr.subs(self.symbols['flux_prime'], flux)
+
+            eq = Eq(var, expr)  # create equation
 
             if comp in compartments:
                 self.last_SS_solution['SS_eqs'][comp] = eq
@@ -680,9 +679,11 @@ class PhotoKineticSymbolicModel:
 
         self.symbols['compartments'].clear()
         self.symbols['equations'].clear()
+        self.symbols['equations_prime'].clear()
         self.symbols['rate_constants'].clear()
         self.symbols['time'] = None
         self.symbols['flux'] = None
+        self.symbols['flux_prime'] = None
         self.symbols['l'] = None
         self.symbols['epsilon'] = None
         self.symbols['substitutions'].clear()
@@ -705,7 +706,7 @@ class PhotoKineticSymbolicModel:
         sympy_rhss = len(comps) * [0]
 
         # time and concentrations of absorbed photons J
-        self.symbols['time'], self.symbols['flux'] = symbols('t J')
+        self.symbols['time'], self.symbols['flux'], self.symbols['flux_prime'] = symbols('t J J^{\\prime}')
         self.symbols['l'], self.symbols['epsilon'] = symbols('l epsilon')
 
         for c in comps:
@@ -729,20 +730,16 @@ class PhotoKineticSymbolicModel:
         # symbolic rate constants dictionary
         s_rates_dict = dict(zip(r_names, self.symbols['rate_constants']))
 
+        abs_comp_idx = None
+
         for el in self.elem_reactions:
             i_from = list(map(lambda com: inv_idx[com], el['from_comp']))  # list of indexes of starting materials
             i_to = list(map(lambda com: inv_idx[com], el['to_comp']))  # list of indexes of reaction products
 
             if el['type'] == 'absorption':
-
-                k = i_from[0]  # absorption for more compartments does not make sense
-                # 1 - 10 ** (-l * eps * c)
-                fraction_abs = 1 - 10 ** (-self.symbols['l'] * self.symbols['epsilon'] * self.symbols['compartments'][k])
-
-                sympy_rhss[k] -= self.symbols['flux'] * fraction_abs
-
-                k = i_to[0]
-                sympy_rhss[k] += self.symbols['flux'] * fraction_abs
+                abs_comp_idx = i_from[0] # absorption for more compartments does not make sense
+                sympy_rhss[abs_comp_idx] -= self.symbols['flux_prime']
+                sympy_rhss[i_to[0]] += self.symbols['flux_prime']
 
                 continue
 
@@ -757,12 +754,24 @@ class PhotoKineticSymbolicModel:
             for k in i_to:
                 sympy_rhss[k] += forward_prod   # products
 
+        if abs_comp_idx is not None:
+            fraction_abs = 1 - 10 ** (-self.symbols['l'] * self.symbols['epsilon'] * self.symbols['compartments'][abs_comp_idx])
+            flux = self.symbols['flux'] * fraction_abs
+
         for f, rhs in zip(self.symbols['compartments'], sympy_rhss):
             # construct differential equation
             # rhs_factored = factor(rhs, deep=True)
 
-            _eq = Eq(f.diff(self.symbols['time']), rhs)
-            self.symbols['equations'].append(_eq)
+            eq_prime = Eq(f.diff(self.symbols['time']), rhs)
+            eq_full = Eq(f.diff(self.symbols['time']), rhs)
+
+            # substitute J' for J(1 - 10** - l*eps*c)
+            if abs_comp_idx is not None:
+                eq_full = eq_full.subs(self.symbols['flux_prime'], flux)
+
+            self.symbols['equations'].append(eq_full)
+            self.symbols['equations_prime'].append(eq_prime)
+
 
     def simulate_model(self, rate_constants: Union[List, Tuple, np.ndarray],
                        initial_concentrations: Union[List, Tuple, np.ndarray],

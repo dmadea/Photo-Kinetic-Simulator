@@ -517,46 +517,6 @@ class PhotoKineticSymbolicModel:
             latex_eq = f"\\begin{{align*}} {sep.join(eqs)} \\end{{align*}}"
             display(Math(latex_eq))
 
-    # def pprint_model(self, use_environment: bool = True):
-    #     """Pretty prints model. 
-        
-    #     Parameters
-    #     ----------
-    #     use_environment : 
-    #         If True, it will use the align LaTeX environment to print the model.
-    #     """
-        
-
-    # # def pprint_model_align_env(self):
-
-    # #     latex_eq = ''
-
-    # #     for el in self.elem_reactions:
-    # #         reactants = ' + '.join([f'\\mathrm{{{comp}}}' for comp in el['from_comp']])
-    # #         products = ' + '.join([f'\\mathrm{{{comp}}}' for comp in el['to_comp']])
-
-    # #         r_name = el['rate_constant_name']
-
-    # #         latex_eq += f'{reactants} &\\xrightarrow{{{r_name}}} {products} \\\\'
-
-    # #     latex_eq = r'\begin{align}' + latex_eq + r'\end{align}'
-    # #     display(Math(latex_eq))
-
-    # # def pprint_model_no_env(self):
-    # #     """Pretty prints model. Does not use the math environment."""
-
-    # #     # TODO -->  check for equilibrium reactions
-
-    # #     for el in self.elem_reactions:
-    # #         reactants = ' + '.join([f'\\mathrm{{{comp}}}' for comp in el['from_comp']])
-    # #         products = ' + '.join([f'\\mathrm{{{comp}}}' for comp in el['to_comp']])
-
-    # #         r_name = el['rate_constant_name']
-
-    # #         latex_eq = f'{reactants} \\xrightarrow{{{r_name}}} {products}'
-
-    # #         display(Math(latex_eq))
-
     def pprint_equations(self, display_primed: bool = False):
         """
         Pretty prints the equations.

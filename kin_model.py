@@ -352,8 +352,6 @@ class PhotoKineticSymbolicModel:
         Model representing input reaction scheme.
         """
 
-        # TODO -> take into account + in exponents, like H^+, + should not be in this case used as separator
-
         if scheme.strip() == '':
             raise ValueError("Parameter scheme is empty!")
 
@@ -361,7 +359,11 @@ class PhotoKineticSymbolicModel:
         _model.scheme = scheme
 
         # find any number of digits that are at the beginning of any characters
-        pattern = re.compile(r'^(\d+).+')
+        p_digits = re.compile(r'^(\d+).+')
+        # http://www.rexegg.com/regex-best-trick.html
+        # we want to find only those + signs not enclosed in curly braces, not after ^ and _ characters
+        # therefore, we will take only group 4
+        p_plus_signs = re.compile(r'{[^{}]*(\+)[^{}]*}|\^(\+)|_(\+)|(\+)')  
 
         inv_delimiters = dict(zip(cls.delimiters.values(), cls.delimiters.keys()))
 
@@ -384,16 +386,27 @@ class PhotoKineticSymbolicModel:
 
             delimiters = list(cls.delimiters.values())
             for side, delimiter in filter(lambda e: e[0] != '',  split_delimiters(line, delimiters)):  # remove empty entries
+                # gets matches of the found + signs in the side
+                matches = re.finditer(p_plus_signs, side)
+
+                # get only spans for group 4
+                plus_sign_spans = [m.span(4) for m in matches if m.group(4) is not None]
+                plus_sign_spans = [(None, 0)] + plus_sign_spans + [(None, None)]  # add start and end tuples
+
+                splitted_side = []  # split the side based on the spans
+                for (s, e), (s1, e1) in zip(plus_sign_spans[:-1], plus_sign_spans[1:]):
+                    splitted_side.append(side[e:s1])
+
                 entries = []
 
                 # process possible number in front of species, species cannot have numbers in their text
-                for entry in filter(None, side.split('+')):
+                for entry in splitted_side:
                     entry = ''.join(filter(lambda d: not d.isspace(), list(entry)))  # remove white space chars
 
                     if entry == '':
                         continue
 
-                    match = re.match(pattern, entry)
+                    match = re.match(p_digits, entry)
 
                     number = 1
                     if match is not None:  # number in front of a token
@@ -472,14 +485,18 @@ class PhotoKineticSymbolicModel:
 
     def print_model(self, force_use_environment: bool = False ):
         """
-        Print the model in LaTeX format. Uses the align LaTeX environment.
+        Print the model in LaTeX format. If not in Colab, uses the align* LaTeX environment.
+
+        Parameters
+        ----------
+        force_use_environment : 
+            If True, forces to use the align* LaTeX environment for printing the model. Default False.
         """
         # trick with Markdown https://stackoverflow.com/questions/48422762/is-it-possible-to-show-print-output-as-latex-in-jupyter-notebook
 
         force_use_environment = not IN_COLAB or force_use_environment
 
-        latex_eq = ''
-        idxs = []  # iindexes of reversible reactions
+        idxs = []  # indexes of reversible reactions
         eqs = []
 
         and_symbol = '&' if force_use_environment else ''
@@ -520,6 +537,12 @@ class PhotoKineticSymbolicModel:
     def pprint_equations(self, display_primed: bool = False):
         """
         Pretty prints the equations.
+
+        Parameters
+        ----------
+        display_primed : 
+            If True, displays the J' term instead of J(1-10** -l*eps*c) term form absorption
+            elementary step. Default False.
         """
 
         if self.symbols['equations'] is None:
@@ -827,6 +850,12 @@ class PhotoKineticSymbolicModel:
         sig_figures : 
             Number of significant figures the rate constants, initial concentrations and/or substitutions will be rounded to 
             if displayed in the plot.
+        precise_simulation :
+            If True, tries to use the higher precision float, np.longdouble. On windows build, this will be just regular np.float64, but with
+            Anaconda installation and on other OS, it should be np.float128, which is 80 bit float padded to 96 bits (x86-32) or 128 bits
+            (x86-64). https://stackoverflow.com/questions/9062562/what-is-the-internal-precision-of-numpy-float128
+            Also, it evaluates the terms in differential equations separately and then sums them from lowest to highest (in absolute values) 
+            to minimize the summation errors.
         """
         
         if len(self.symbols['equations']) == 0:
@@ -1065,52 +1094,63 @@ if __name__ == '__main__':
     # ^1S --> P            // k_r  # formation of the photoproduct from the singlet state
     # """
 
+    str_model = """
+    # ^1RB^{2-*} --> RB^{2-}                                        // k_s  # singlet decay to ground state
+    # ^1RB^{2-*} --> ^3RB^{2-*} --> RB^{2-}                         // k_{isc} ; k_d
+    # ^3RB^{2-*} + RB^{2-} --> 2RB^{2-}                             // k_{sq}
+    # ^3RB^{2-*} + RB^{2-} --> RB^{\\bullet -} + RB^{\\bullet 3-}   // k_{redox*}
+    # 2^3RB^{2-*} --> ^1RB^{2-*}  + RB^{2-}                         // k_{TT}  # triplet-triplet annihilation
+    2^3RB^{2-*} --> RB^{\\bullet -}  + RB^{\\bullet 3-}           // k_{redox**}
+    RB^{\\bullet -}  + RB^{\\bullet 3-} --> 2 RB^{2-}             // k_{-eT}  # back electron transfer
+    """
+
+    # instantiate the model
+    model = PhotoKineticSymbolicModel.from_text(str_model)
+
     # model = """
-    # ArO_2 --> Ar + ^1O_2             // k_1  # absorption and singlet state decay
-    # ^1O_2 --> ^3O_2                  // k_d
-    # # ^1O_2 + Ar --> Ar + ^3O_2         // k_{q,Ar}
-    # # ^1O_2 + ArO_2 --> ArO_2 + ^3O_2     // k_{q,ArO_2}
-    # ^1O_2 + S --> S + ^3O_2           // k_{q,S}
-    # S + ^1O_2 -->                      // k_r
+    # A + B --> C + D + E          // k_1  # absorption and singlet state decay
+    # A^{2+} + F -->              // k_d
     # """
 
     # # instantiate the model
     # model = PhotoKineticSymbolicModel.from_text(model)
+
+
     # model.print_model()  # print the model
-    # model.pprint_equations()  # print the ODEs
+    model.pprint_equations()  # print the ODEs
     # print('\n')
 
-    text_model = """
-    GS -hv-> ^1S --> GS  // k_s  # absorption and decay back to ground state
-    ^1S --> P            // k_r  # formation of the photoproduct from the singlet state
-    """
+    # text_model = """
+    # GS -hv-> ^1S --> GS  // k_s  # absorption and decay back to ground state
+    # ^1S --> P            // k_r  # formation of the photoproduct from the singlet state
+    # """
 
-    # instantiate the model
-    model = PhotoKineticSymbolicModel.from_text(text_model)
-    print(model.print_model())  # print the model
-    model.pprint_equations()  # print the ODEs
+    # # instantiate the model
+    # model = PhotoKineticSymbolicModel.from_text(text_model)
+    # print(model.print_model())  # print the model
+    # model.pprint_equations()  # print the ODEs
 
-    ks, kr = model.symbols['rate_constants']
-    phi_r, tau_F = symbols('\\phi_r, \\tau_F')
+    # ks, kr = model.symbols['rate_constants']
+    # phi_r, tau_F = symbols('\\phi_r, \\tau_F')
 
-    print('\nWe make the following substitutions:')
+    # print('\nWe make the following substitutions:')
 
-    # Fluorescence lifetime is inverse of total decay rate of the singlet state
-    # Quantum yield of the photoreaction is then k_r * fluorescence lifetime
-    subs=[(1/(ks+kr), tau_F), (kr * tau_F, phi_r)]
+    # # Fluorescence lifetime is inverse of total decay rate of the singlet state
+    # # Quantum yield of the photoreaction is then k_r * fluorescence lifetime
+    # subs=[(1/(ks+kr), tau_F), (kr * tau_F, phi_r)]
 
-    # perform the steady state approximation for singlet state
-    # model.steady_state_approx(['^1S'], subs=subs, print_solution=False)
+    # # perform the steady state approximation for singlet state
+    # # model.steady_state_approx(['^1S'], subs=subs, print_solution=False)
 
-    rate_constants = [ 1e9, 1e8 ]  # in the order of k_s, k_r
-    initial_concentrations = [ 2e-5, 0, 0 ] # in the order of GS, ^1S, P
-    subs = [ 1e8/(1e9+1e8), 1/(1e9 + 1e8) ]  # in the order of tau_F, phi_r
+    # rate_constants = [ 1e9, 1e8 ]  # in the order of k_s, k_r
+    # initial_concentrations = [ 2e-5, 0, 0 ] # in the order of GS, ^1S, P
+    # subs = [ 1e8/(1e9+1e8), 1/(1e9 + 1e8) ]  # in the order of tau_F, phi_r
 
-    # simulate the model, flux is the 'concentration of photons', it is the J parameter
-    # l is the length of the cuvette = 1 and epsilon = 1e5 is molar abs. coefficient
-    # as we start with c=2e-5 M, the initial absorbance A = 2
-    model.simulate_model(rate_constants, initial_concentrations, 
-     t_max=600, flux=np.linspace(1e-7, 1e-5, 10), l=1, epsilon=1e5, plot_separately=True, precise_simulation=True)
+    # # simulate the model, flux is the 'concentration of photons', it is the J parameter
+    # # l is the length of the cuvette = 1 and epsilon = 1e5 is molar abs. coefficient
+    # # as we start with c=2e-5 M, the initial absorbance A = 2
+    # model.simulate_model(rate_constants, initial_concentrations, 
+    #  t_max=600, flux=np.linspace(1e-7, 1e-5, 10), l=1, epsilon=1e5, plot_separately=True, precise_simulation=True)
 
     
     # ks, kr = model.symbols['rate_constants']

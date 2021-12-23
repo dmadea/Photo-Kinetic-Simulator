@@ -363,6 +363,7 @@ class PhotoKineticSymbolicModel:
         # http://www.rexegg.com/regex-best-trick.html
         # we want to find only those + signs not enclosed in curly braces, not after ^ and _ characters
         # therefore, we will take only group 4
+        # this cannot handle nested braces..., TODO: fix this
         p_plus_signs = re.compile(r'{[^{}]*(\+)[^{}]*}|\^(\+)|_(\+)|(\+)')  
 
         inv_delimiters = dict(zip(cls.delimiters.values(), cls.delimiters.keys()))

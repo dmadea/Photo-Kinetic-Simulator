@@ -765,9 +765,10 @@ class PhotoKineticSymbolicModel:
                        l: float = 1, epsilon: float = 1e5, use_SS_approx: bool = True, ODE_solver: str = 'Radau', 
                        plot_separately: bool = True,  figsize: Union[tuple, list] = (6, 3), yscale: str = 'linear',
                        cmap: str = 'plasma', lw: float = 2, legend_fontsize: int = 10, legend_labelspacing: float = 0,
-                       filepath: Union[None, str] = None, dpi: int = 300, transparent: bool = False,
-                       plot_results: bool = True, rescale: bool = True, auto_convert_time_units: bool = True, 
-                       sig_figures: int = 3, precise_simulation: bool = False):
+                       legend_loc: str = 'best', legend_bbox_to_anchor: Union[tuple, None] = None, 
+                       stack_plots_in_rows: bool = True, filepath: Union[None, str] = None, dpi: int = 300, 
+                       transparent: bool = False, plot_results: bool = True, rescale: bool = True,
+                        auto_convert_time_units: bool = True, sig_figures: int = 3, precise_simulation: bool = False):
         """
         Simulates the current model and plots the results if ``plot_results`` is True (default True). Parameters
         rate_constant and initial_concentrations can contain iterables. In this case, the model will be simulated
@@ -834,6 +835,12 @@ class PhotoKineticSymbolicModel:
             Fontsize of the legend. Optional. Default 10.
         legend_labelspacing: 
             Vertical spacing of the labels in legend. Optional. Default 0. Can be negative.
+        legend_loc:
+            Location of the legend. Default 'best'.
+        legend_bbox_to_anchor:
+            Box to position the legend. Default None.
+        stack_plots_in_rows:
+            Default True.
         filepath: 
             If specified (default None), the plot will be saved into this location with a specified filename.
         dpi: 
@@ -1016,11 +1023,18 @@ class PhotoKineticSymbolicModel:
             s_factor, t_unit = get_time_unit(t_max)
             times_scaled *= s_factor
 
+        # legend_loc:
+        #     Location of the legend. Default 'best'.
+        # legend_bbox_to_anchor:
+        #     Box to position the legend. Default None.
+        # stack_plots_in_rows:
+        #     Default True.
+
         # plot the results
         if plot_separately:
             n_rows = n - len(idxs_constant_cast)
             figsize = (figsize[0] , figsize[1] * n_rows)
-            fig, axes = plt.subplots(n_rows, 1, figsize=figsize, sharex=True)
+            fig, axes = plt.subplots(n_rows if stack_plots_in_rows else 1, 1 if stack_plots_in_rows else n_rows, figsize=figsize, sharex=True)
 
             # colormap for inner parameters
             cmap = cm.get_cmap(cmap)
@@ -1029,8 +1043,8 @@ class PhotoKineticSymbolicModel:
                     label = '' if par_names[j] == '' else f'${par_names[j]}$'
                     ax.plot(times_scaled, trace[j], label=label if i == 0 else '', lw=lw, color=cmap(j / trace.shape[0]))
                 ax.set_ylabel(f'c / {self.concentration_unit}')
-                if i == 0 and k > 1:
-                    ax.legend(frameon=False, fontsize=legend_fontsize, labelspacing=legend_labelspacing)
+                if i == (0 if stack_plots_in_rows else n_rows - 1) and k > 1:
+                    ax.legend(frameon=False, fontsize=legend_fontsize, labelspacing=legend_labelspacing, loc=legend_loc, bbox_to_anchor=legend_bbox_to_anchor)
                 ax.set_yscale(yscale)
                 ax.set_title(f'$\\mathrm{{{comp}}}$')
                 ax.tick_params(axis='both', which='major', direction='in')
@@ -1041,7 +1055,7 @@ class PhotoKineticSymbolicModel:
 
         else:
             figsize = (figsize[0] , figsize[1] * k)
-            fig, axes = plt.subplots(k, 1, figsize=figsize, sharex=True)
+            fig, axes = plt.subplots(k if stack_plots_in_rows else 1, 1 if stack_plots_in_rows else k, figsize=figsize, sharex=True)
 
             for i in range(k):
                 ax = axes[i] if k > 1 else axes
@@ -1060,7 +1074,7 @@ class PhotoKineticSymbolicModel:
                 ax.tick_params(axis='both', which='minor', direction='in')
                 ax.xaxis.set_ticks_position('both')
                 ax.yaxis.set_ticks_position('both')
-                ax.legend(frameon=False, fontsize=legend_fontsize, labelspacing=legend_labelspacing)
+                ax.legend(frameon=False, fontsize=legend_fontsize, labelspacing=legend_labelspacing, loc=legend_loc, bbox_to_anchor=legend_bbox_to_anchor)
             
         plt.tight_layout()
         if filepath:

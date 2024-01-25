@@ -622,12 +622,14 @@ class PhotoKineticSymbolicModel:
             self.symbols['substitutions'] = sorted(free_symbols, key=lambda symbol: symbol.name)
 
         # prepare the J(1-10**-l*eps*c) substitution
-        abs_el_r = list(filter(lambda el: el['type'] == 'absorption', self.elem_reactions))
+        absorbing_compartments_idxs  = list(map(lambda el: all_compartments.index(el['from_comp'][0]), 
+                                                filter(lambda el: el['type'] == 'absorption', self.elem_reactions)))
+        n_abs = len(absorbing_compartments_idxs)
 
-        if len(abs_el_r) > 0:
-            idx = all_compartments.index(abs_el_r[0]['from_comp'][0])
-            c = self.symbols['compartments'][idx]
-            flux = self.symbols['flux'] * (1 - 10 ** (-self.symbols['l'] * self.symbols['epsilon'] * c))
+        if n_abs > 0:
+            sum_abs_comps = sum(map(lambda idx: self.symbols['compartments'][idx], absorbing_compartments_idxs))
+            fraction_abs = 1 - 10 ** (-self.symbols['l'] * self.symbols['epsilon'] * (sum_abs_comps))
+            flux = self.symbols['flux'] * fraction_abs
 
         # the order of solutions is the same as the input
         for comp, (var, expr) in zip(all_compartments, solution.items()):
@@ -645,7 +647,7 @@ class PhotoKineticSymbolicModel:
                     expr = expr.subs(old, new)
 
             # substitute J' for J(1 - 10** -l*eps*c)
-            if len(abs_el_r) > 0:
+            if n_abs > 0:
                 expr = expr.subs(self.symbols['flux_prime'], flux)
 
             eq = Eq(var, expr)  # create equation
@@ -714,16 +716,29 @@ class PhotoKineticSymbolicModel:
         # symbolic rate constants dictionary
         s_rates_dict = dict(zip(r_names, self.symbols['rate_constants']))
 
-        abs_comp_idx = None
+        # abs_comp_idx = None
+        # n_abs = len(list(filter(lambda el: el['type'] == 'absorption', self.elem_reactions)))
+
+        absorbing_compartments_idxs = list(filter(lambda el: el['type'] == 'absorption', self.elem_reactions))
+        absorbing_compartments_idxs  = list(map(lambda el: inv_idx[el['from_comp'][0]], absorbing_compartments_idxs))
+        n_abs = len(absorbing_compartments_idxs)
+        sum_abs_comps = None
 
         for el in self.elem_reactions:
             i_from = list(map(lambda com: inv_idx[com], el['from_comp']))  # list of indexes of starting materials
             i_to = list(map(lambda com: inv_idx[com], el['to_comp']))  # list of indexes of reaction products
 
             if el['type'] == 'absorption':
-                abs_comp_idx = i_from[0] # absorption for more compartments does not make sense
-                sympy_rhss[abs_comp_idx] -= self.symbols['flux_prime']
-                sympy_rhss[i_to[0]] += self.symbols['flux_prime']
+                _from = i_from[0]
+                _to = i_to[0]
+                if n_abs > 1:
+                    sum_abs_comps = sum(map(lambda idx: self.symbols['compartments'][idx], absorbing_compartments_idxs))
+                    sympy_rhss[_from] -= self.symbols['compartments'][_from] * self.symbols['flux_prime'] / sum_abs_comps
+                    sympy_rhss[_to] += self.symbols['compartments'][_from] * self.symbols['flux_prime'] / sum_abs_comps
+                else:
+                    sum_abs_comps = self.symbols['compartments'][_from]
+                    sympy_rhss[_from] -= self.symbols['flux_prime']
+                    sympy_rhss[_to] += self.symbols['flux_prime']
 
                 continue
 
@@ -738,8 +753,8 @@ class PhotoKineticSymbolicModel:
             for k in i_to:
                 sympy_rhss[k] += forward_prod   # products
 
-        if abs_comp_idx is not None:
-            fraction_abs = 1 - 10 ** (-self.symbols['l'] * self.symbols['epsilon'] * self.symbols['compartments'][abs_comp_idx])
+        if sum_abs_comps is not None:
+            fraction_abs = 1 - 10 ** (-self.symbols['l'] * self.symbols['epsilon'] * (sum_abs_comps))
             flux = self.symbols['flux'] * fraction_abs
 
         for f, rhs in zip(self.symbols['compartments'], sympy_rhss):
@@ -750,7 +765,7 @@ class PhotoKineticSymbolicModel:
             eq_full = Eq(f.diff(self.symbols['time']), rhs)
 
             # substitute J' for J(1 - 10** - l*eps*c)
-            if abs_comp_idx is not None:
+            if sum_abs_comps is not None:
                 eq_full = eq_full.subs(self.symbols['flux_prime'], flux)
 
             self.symbols['equations'].append(eq_full)
@@ -768,7 +783,7 @@ class PhotoKineticSymbolicModel:
                        legend_loc: str = 'best', legend_bbox_to_anchor: Union[tuple, None] = None, 
                        stack_plots_in_rows: bool = True, filepath: Union[None, str] = None, dpi: int = 300, 
                        transparent: bool = False, plot_results: bool = True, rescale: bool = True,
-                        auto_convert_time_units: bool = True, sig_figures: int = 3, precise_simulation: bool = False):
+                       auto_convert_time_units: bool = True, sig_figures: int = 3, precise_simulation: bool = False):
         """
         Simulates the current model and plots the results if ``plot_results`` is True (default True). Parameters
         rate_constant and initial_concentrations can contain iterables. In this case, the model will be simulated

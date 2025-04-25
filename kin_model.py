@@ -1,4 +1,3 @@
-
 from sympy import Function, solve, Eq, factor, simplify, Symbol, symbols, lambdify, pprint, init_printing, Add
 from IPython.display import display, Math, Markdown
 import re
@@ -294,14 +293,15 @@ class PhotoKineticSymbolicModel:
         self.scheme = ""
 
         self.symbols = dict(compartments=[],
-                            equations=[],  # contains diff equations
-                            equations_prime=[], # contains diff equations with substitution of J' = J(1 - 10 ** -l*eps*c)
+                            equations=[],  # contains diff equations in full form
+                            equations_Fk=[], # contains diff equations with symbol Fk instead of (1 - 10 ** -A) / A
                             rate_constants=[],
                             time=None,
                             flux=None,    # J
-                            flux_prime=None,  # J'
+                            Fk=None,  # Photokinetic factor
+                            explicit_Fk=None,  # explicit Fk = (1 - 10 ** -A) / A
                             l=None,
-                            epsilon=None,
+                            epsilons=[],
                             substitutions=[])  # contains the symbols used for substitutions
 
         # orders of the rate constants in the model
@@ -535,21 +535,20 @@ class PhotoKineticSymbolicModel:
             latex_eq = f"\\begin{{align*}} {sep.join(eqs)} \\end{{align*}}"
             display(Math(latex_eq))
 
-    def pprint_equations(self, display_primed: bool = False):
+    def pprint_equations(self, display_full_equations: bool = False):
         """
         Pretty prints the equations.
 
         Parameters
         ----------
-        display_primed : 
-            If True, displays the J' term instead of J(1-10** -l*eps*c) term form absorption
-            elementary step. Default False.
+        display_full_equations : 
+            If True, displays the the equation with explicitly written photokinetic factor.
         """
 
         if self.symbols['equations'] is None:
             return
 
-        eqs = self.symbols['equations_prime'] if display_primed else self.symbols['equations']
+        eqs = self.symbols['equations'] if display_full_equations else self.symbols['equations_Fk']
 
         for eq in eqs:
             display(eq)
@@ -571,6 +570,7 @@ class PhotoKineticSymbolicModel:
 
     def steady_state_approx(self, compartments: Union[List[str], Tuple[str]],
                             subs: Union[None, Iterable[tuple]] = None,
+                            print_full_equations: bool = False,
                             print_solution: bool = True):
         """
         Performs the steady state approximation for the given species.
@@ -599,7 +599,7 @@ class PhotoKineticSymbolicModel:
 
         all_compartments = self.get_compartments()
 
-        for comp, eq, f in zip(all_compartments, self.symbols['equations_prime'], self.symbols['compartments']):
+        for comp, eq, f in zip(all_compartments, self.symbols['equations_Fk'], self.symbols['compartments']):
             if comp in compartments:  # use SS approximation
                 eq2solve.append(Eq(eq.rhs, 0))
                 variables.append(f)
@@ -622,14 +622,14 @@ class PhotoKineticSymbolicModel:
             self.symbols['substitutions'] = sorted(free_symbols, key=lambda symbol: symbol.name)
 
         # prepare the J(1-10**-l*eps*c) substitution
-        absorbing_compartments_idxs  = list(map(lambda el: all_compartments.index(el['from_comp'][0]), 
-                                                filter(lambda el: el['type'] == 'absorption', self.elem_reactions)))
-        n_abs = len(absorbing_compartments_idxs)
+        # absorbing_compartments_idxs  = list(map(lambda el: all_compartments.index(el['from_comp'][0]), 
+        #                                         filter(lambda el: el['type'] == 'absorption', self.elem_reactions)))
+        n_abs = len(self.symbols['epsilons'])
 
-        if n_abs > 0:
-            sum_abs_comps = sum(map(lambda idx: self.symbols['compartments'][idx], absorbing_compartments_idxs))
-            fraction_abs = 1 - 10 ** (-self.symbols['l'] * self.symbols['epsilon'] * (sum_abs_comps))
-            flux = self.symbols['flux'] * fraction_abs
+        # if n_abs > 0:
+        #     sum_abs_comps = sum(map(lambda idx: self.symbols['compartments'][idx], absorbing_compartments_idxs))
+        #     fraction_abs = 1 - 10 ** (-self.symbols['l'] * self.symbols['epsilon'] * (sum_abs_comps))
+        #     flux = self.symbols['flux'] * fraction_abs
 
         # the order of solutions is the same as the input
         for comp, (var, expr) in zip(all_compartments, solution.items()):
@@ -646,32 +646,39 @@ class PhotoKineticSymbolicModel:
                 for old, new in subs:
                     expr = expr.subs(old, new)
 
-            # substitute J' for J(1 - 10** -l*eps*c)
-            if n_abs > 0:
-                expr = expr.subs(self.symbols['flux_prime'], flux)
 
-            eq = Eq(var, expr)  # create equation
+            # substitute Fk for explicit photokinetic factor
+            if n_abs > 0:
+                expr_full = expr.subs(self.symbols['Fk'], self.symbols['explicit_Fk'])
+                eq_full = Eq(var, expr_full)  # create equation
+            else:
+                eq_full = Eq(var, expr)  # create equation
+
+            eq_Fk = Eq(var, expr)  # create equation
 
             if comp in compartments:
-                self.last_SS_solution['SS_eqs'][comp] = eq
+                self.last_SS_solution['SS_eqs'][comp] = eq_full
             else:
-                self.last_SS_solution['diff_eqs'][comp] = eq
+                self.last_SS_solution['diff_eqs'][comp] = eq_full
 
             if print_solution:
-                display(eq)
+                if print_full_equations:
+                    display(eq_full)
+                else:
+                    display(eq_Fk)
 
     def clear_model(self):
         """Clears the model."""
 
         self.symbols['compartments'].clear()
         self.symbols['equations'].clear()
-        self.symbols['equations_prime'].clear()
+        self.symbols['equations_Fk'].clear()
         self.symbols['rate_constants'].clear()
         self.symbols['time'] = None
         self.symbols['flux'] = None
-        self.symbols['flux_prime'] = None
+        self.symbols['Fk'] = None
         self.symbols['l'] = None
-        self.symbols['epsilon'] = None
+        self.symbols['epsilons'].clear()
         self.symbols['substitutions'].clear()
 
         self._rate_constant_orders.clear()
@@ -692,8 +699,8 @@ class PhotoKineticSymbolicModel:
         sympy_rhss = len(comps) * [0]
 
         # time and concentrations of absorbed photons J
-        self.symbols['time'], self.symbols['flux'], self.symbols['flux_prime'] = symbols('t J J^{\\prime}')
-        self.symbols['l'], self.symbols['epsilon'] = symbols('l epsilon')
+        self.symbols['time'], self.symbols['flux'],  self.symbols['Fk'] = symbols('t J F_k')
+        self.symbols['l'] = symbols('l')
 
         for c in comps:
             # f = Function(f'[{{{c}}}]')(s_t)
@@ -719,26 +726,36 @@ class PhotoKineticSymbolicModel:
         # abs_comp_idx = None
         # n_abs = len(list(filter(lambda el: el['type'] == 'absorption', self.elem_reactions)))
 
-        absorbing_compartments_idxs = list(filter(lambda el: el['type'] == 'absorption', self.elem_reactions))
-        absorbing_compartments_idxs  = list(map(lambda el: inv_idx[el['from_comp'][0]], absorbing_compartments_idxs))
-        n_abs = len(absorbing_compartments_idxs)
-        sum_abs_comps = None
+        # absorbing_compartments_idxs = list(filter(lambda el: el['type'] == 'absorption', self.elem_reactions))
+        # absorbing_compartments_idxs  = list(map(lambda el: inv_idx[el['from_comp'][0]], absorbing_compartments_idxs))
+        # n_abs = len(absorbing_compartments_idxs)
+        # sum_abs_comps = None
+
+        # for idx in absorbing_compartments_idxs:
+        #     self.symbols['epsilons'].append(symbols(f'epsilon_{{{comps[idx]}}}'))
+
+        n_abs = 0  # number of absorbing compartments
+        eps_conc_products = []
 
         for el in self.elem_reactions:
             i_from = list(map(lambda com: inv_idx[com], el['from_comp']))  # list of indexes of starting materials
             i_to = list(map(lambda com: inv_idx[com], el['to_comp']))  # list of indexes of reaction products
 
             if el['type'] == 'absorption':
+                n_abs += 1
                 _from = i_from[0]
                 _to = i_to[0]
-                if n_abs > 1:
-                    sum_abs_comps = sum(map(lambda idx: self.symbols['compartments'][idx], absorbing_compartments_idxs))
-                    sympy_rhss[_from] -= self.symbols['compartments'][_from] * self.symbols['flux_prime'] / sum_abs_comps
-                    sympy_rhss[_to] += self.symbols['compartments'][_from] * self.symbols['flux_prime'] / sum_abs_comps
-                else:
-                    sum_abs_comps = self.symbols['compartments'][_from]
-                    sympy_rhss[_from] -= self.symbols['flux_prime']
-                    sympy_rhss[_to] += self.symbols['flux_prime']
+
+                # create new epsilon symbol for new absorbing compartment
+                eps = symbols(f'\\varepsilon_{{{comps[_from]}}}')
+                self.symbols['epsilons'].append(eps)
+                
+                expr = self.symbols['flux'] * self.symbols['Fk'] * self.symbols['compartments'][_from] * eps
+
+                sympy_rhss[_from] -= expr
+                sympy_rhss[_to] += expr
+
+                eps_conc_products.append(self.symbols['compartments'][_from] * eps)
 
                 continue
 
@@ -753,23 +770,22 @@ class PhotoKineticSymbolicModel:
             for k in i_to:
                 sympy_rhss[k] += forward_prod   # products
 
-        if sum_abs_comps is not None:
-            fraction_abs = 1 - 10 ** (-self.symbols['l'] * self.symbols['epsilon'] * (sum_abs_comps))
-            flux = self.symbols['flux'] * fraction_abs
 
         for f, rhs in zip(self.symbols['compartments'], sympy_rhss):
             # construct differential equation
-            # rhs_factored = factor(rhs, deep=True)
 
-            eq_prime = Eq(f.diff(self.symbols['time']), rhs)
+            eq_Fk = Eq(f.diff(self.symbols['time']), rhs)
             eq_full = Eq(f.diff(self.symbols['time']), rhs)
 
-            # substitute J' for J(1 - 10** - l*eps*c)
-            if sum_abs_comps is not None:
-                eq_full = eq_full.subs(self.symbols['flux_prime'], flux)
+            # substitute Fk for full photokinetic factor
+            if n_abs > 0:
+                A_prime = sum(eps_conc_products)
+                Fk = (1 - 10 ** (-self.symbols['l'] * A_prime)) / A_prime
+                self.symbols['explicit_Fk'] = Fk
+                eq_full = eq_full.subs(self.symbols['Fk'], Fk)
 
             self.symbols['equations'].append(eq_full)
-            self.symbols['equations_prime'].append(eq_prime)
+            self.symbols['equations_Fk'].append(eq_Fk)
 
 
     def simulate_model(self, rate_constants: Union[List, Tuple, np.ndarray],

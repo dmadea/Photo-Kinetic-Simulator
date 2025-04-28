@@ -1,4 +1,4 @@
-from sympy import Function, solve, Eq, factor, simplify, Symbol, symbols, lambdify, pprint, init_printing, Add
+from sympy import Function, solve, Eq, factor, simplify, Symbol, symbols, lambdify, pprint, init_printing, Add, pi, sqrt, exp, ln, Piecewise
 from IPython.display import display, Math, Markdown
 import re
 
@@ -7,6 +7,8 @@ from matplotlib import cm
 import numpy as np
 from scipy.integrate import solve_ivp
 from scipy.stats.mstats import gmean
+
+from numba import vectorize
 
 from typing import Iterable, List, Union, Tuple
 
@@ -125,6 +127,43 @@ def format_number_latex(number: float, sig_figures: int = 3) -> str:
         return f'{num_str} \\times 10^{{{int(exponent)}}}'
 
     return formatted_num
+
+@vectorize(nopython=True, fastmath=False)
+def photokin_factor(A_prime: float, l: float) -> float:
+    """
+    Returns the photokinetic factor for a given A_prime and l.
+
+    Parameters
+    ----------
+    A_prime : float
+        Product of the concentration and the epsilons, A_prime = sum(eps * c)
+    l : float
+        The path length.
+    """
+    ln10 = np.log(10)
+    ll2 = (l * ln10) ** 2 / 2
+
+    A = A_prime * l
+
+    if A < 1e-3:
+        return l * ln10 - A * ll2  # approximation with first two taylor series terms
+    else:
+        return (1 - np.exp(-A * ln10)) / A_prime  # exact photokinetic factor
+
+def gaussian(times: np.ndarray | float, FWHM: float, J0: float = 1) -> np.ndarray | float:
+    """
+    Returns the value of the Gaussian pulse at a given time.
+    """
+
+    ln2 = np.log(2)
+    return J0 * 2 * np.sqrt(ln2) * np.exp(- 4 * ln2 * times ** 2 / FWHM ** 2) / (FWHM * np.sqrt(np.pi))
+
+
+def square(times: np.ndarray | float, sw: float = 1, J0: float = 1) -> np.ndarray | float:
+    """
+    Returns the value of the square pulse at a given time.
+    """
+    return J0 * (times >= 0) & (times <= sw)
 
 
 def get_time_unit(time: float) -> Tuple[float, str]:
@@ -288,29 +327,70 @@ class PhotoKineticSymbolicModel:
         'reaction': '-->',
     }
 
-    def __init__(self, concentration_unit: str = 'M'):
+    Flux_types = ['Gaussian pulse', 'Square pulse', 'Continuous']
+
+    def __init__(self, concentration_unit: str = 'M', flux_type: str = 'Continuous'):
         self.elem_reactions = []  
         self.scheme = ""
+
+        self.flux_type: str = flux_type
+        self.flux_equations: list[Eq] = []
+        self.explicit_Fk_equation: Eq | None = None
 
         self.symbols = dict(compartments=[],
                             equations=[],  # contains diff equations in full form
                             equations_Fk=[], # contains diff equations with symbol Fk instead of (1 - 10 ** -A) / A
                             rate_constants=[],
-                            time=None,
-                            flux=None,    # J
+                            time=None,  # t
+                            flux=None,    # J(t)
                             Fk=None,  # Photokinetic factor
-                            explicit_Fk=None,  # explicit Fk = (1 - 10 ** -A) / A
+                            explicit_Fk=None,  # explicit full Fk = (1 - 10 ** -A) / A
                             l=None,
                             epsilons=[],
                             substitutions=[])  # contains the symbols used for substitutions
 
         # orders of the rate constants in the model
-        self._rate_constant_orders = []
-        self.last_SS_solution = dict(diff_eqs={}, SS_eqs={})  # contains dictionaries
+        self._rate_constant_orders: list[int] = []
+        self.last_SS_solution: dict[str, dict[str, Eq]] = dict(diff_eqs={}, SS_eqs={})  # contains dictionaries
+        self.absorbing_compartments: dict[str, int] = {}  # contains the name indicies pairs of absorbing compartments in self.get_compartments() list
 
         self.C_tensor = None
         self.concentration_unit = concentration_unit
 
+    def create_flux_equations(self):
+        # Flux_types = ['Gaussian pulse', 'Square pulse', 'Continuous']
+
+        sigma, t, sw, J0 = symbols("\\sigma t s_w J_0")
+        FWHM = symbols("FWHM")
+
+        g = J0 * exp( - self.symbols['time'] ** 2 / (2 * sigma ** 2)) / (sigma * sqrt(2 * pi)) 
+        g = g.subs(sigma, FWHM / (2 * sqrt(2 * ln(2)))) # substitute sigma with FWHM
+
+        eq = Eq(self.symbols['flux'], g)
+
+        self.flux_equations.append(eq)
+
+        sq = Piecewise(
+            (0, t < 0),
+            (J0, (t >= 0) & (t <= sw)),
+            (0, True)
+        )
+
+        eq = Eq(self.symbols['flux'], sq)
+        self.flux_equations.append(eq)
+
+        eq = Eq(self.symbols['flux'], J0)
+        self.flux_equations.append(eq)
+
+    @property
+    def flux_type(self):
+        return self._flux_type
+
+    @flux_type.setter
+    def flux_type(self, value):
+        if value not in self.Flux_types:
+            raise ValueError(f"Invalid flux type: {value}. Must be one of {self.Flux_types}")
+        self._flux_type = value
 
     @classmethod
     def from_text(cls, scheme: str, **kwargs):
@@ -321,6 +401,9 @@ class PhotoKineticSymbolicModel:
         Expected format is single or multiline, forward reactions and absorptions are denoted with 
         '-->' and '-hv->' signs, respecively. Names of species are case sensitive. It is possible to
         denote the sub- or superscirpts with latex notation, e.g. ^1S or H_2O, etc.
+
+        To denote the species that absorbs light but behaves as inner filter effect, use the following format:
+        A -hv-> A    # absorbing species that absorbs light but yield not photoproduct
 
         Rate constants for individual reactions can be taken from the text input. They are denoted
         at the end of the each line after '//' characters and are separated by semicolon ';'. If the rate
@@ -550,6 +633,8 @@ class PhotoKineticSymbolicModel:
 
         eqs = self.symbols['equations'] if display_full_equations else self.symbols['equations_Fk']
 
+        display(self.flux_equations[self.Flux_types.index(self.flux_type)], self.explicit_Fk_equation)
+
         for eq in eqs:
             display(eq)
 
@@ -570,7 +655,6 @@ class PhotoKineticSymbolicModel:
 
     def steady_state_approx(self, compartments: Union[List[str], Tuple[str]],
                             subs: Union[None, Iterable[tuple]] = None,
-                            print_full_equations: bool = False,
                             print_solution: bool = True):
         """
         Performs the steady state approximation for the given species.
@@ -624,12 +708,15 @@ class PhotoKineticSymbolicModel:
         # prepare the J(1-10**-l*eps*c) substitution
         # absorbing_compartments_idxs  = list(map(lambda el: all_compartments.index(el['from_comp'][0]), 
         #                                         filter(lambda el: el['type'] == 'absorption', self.elem_reactions)))
-        n_abs = len(self.symbols['epsilons'])
+        # n_abs = len(self.symbols['epsilons'])
 
         # if n_abs > 0:
         #     sum_abs_comps = sum(map(lambda idx: self.symbols['compartments'][idx], absorbing_compartments_idxs))
         #     fraction_abs = 1 - 10 ** (-self.symbols['l'] * self.symbols['epsilon'] * (sum_abs_comps))
         #     flux = self.symbols['flux'] * fraction_abs
+
+        if print_solution:
+            display(self.flux_equations[self.Flux_types.index(self.flux_type)], self.explicit_Fk_equation)
 
         # the order of solutions is the same as the input
         for comp, (var, expr) in zip(all_compartments, solution.items()):
@@ -648,24 +735,25 @@ class PhotoKineticSymbolicModel:
 
 
             # substitute Fk for explicit photokinetic factor
-            if n_abs > 0:
-                expr_full = expr.subs(self.symbols['Fk'], self.symbols['explicit_Fk'])
-                eq_full = Eq(var, expr_full)  # create equation
-            else:
-                eq_full = Eq(var, expr)  # create equation
+            # if n_abs > 0:
+            #     expr_full = expr.subs(self.symbols['Fk'], self.symbols['explicit_Fk'])
+            #     eq_full = Eq(var, expr_full)  # create equation
+            # else:
+            #     eq_full = Eq(var, expr)  # create equation
 
             eq_Fk = Eq(var, expr)  # create equation
 
             if comp in compartments:
-                self.last_SS_solution['SS_eqs'][comp] = eq_full
+                self.last_SS_solution['SS_eqs'][comp] = eq_Fk
             else:
-                self.last_SS_solution['diff_eqs'][comp] = eq_full
+                self.last_SS_solution['diff_eqs'][comp] = eq_Fk
 
             if print_solution:
-                if print_full_equations:
-                    display(eq_full)
-                else:
-                    display(eq_Fk)
+                # if print_full_equations:
+                #     display(eq_full)
+                # else:
+                
+                display(eq_Fk)
 
     def clear_model(self):
         """Clears the model."""
@@ -681,6 +769,7 @@ class PhotoKineticSymbolicModel:
         self.symbols['epsilons'].clear()
         self.symbols['substitutions'].clear()
 
+        self.absorbing_compartments.clear()
         self._rate_constant_orders.clear()
         self.C_tensor = None
         self.scheme = ''
@@ -699,8 +788,11 @@ class PhotoKineticSymbolicModel:
         sympy_rhss = len(comps) * [0]
 
         # time and concentrations of absorbed photons J
-        self.symbols['time'], self.symbols['flux'],  self.symbols['Fk'] = symbols('t J F_k')
+        # self.symbols['time'], self.symbols['flux'],  self.symbols['Fk'] = symbols('t J F_k')
+        self.symbols['time'] = symbols('t')
         self.symbols['l'] = symbols('l')
+        self.symbols['flux'] = Function('J')(self.symbols['time'])
+        self.symbols['Fk'] = Function('F_k')(self.symbols['time'])
 
         for c in comps:
             # f = Function(f'[{{{c}}}]')(s_t)
@@ -749,6 +841,7 @@ class PhotoKineticSymbolicModel:
                 # create new epsilon symbol for new absorbing compartment
                 eps = symbols(f'\\varepsilon_{{{comps[_from]}}}')
                 self.symbols['epsilons'].append(eps)
+                self.absorbing_compartments[comps[_from]] = _from
                 
                 expr = self.symbols['flux'] * self.symbols['Fk'] * self.symbols['compartments'][_from] * eps
 
@@ -782,18 +875,23 @@ class PhotoKineticSymbolicModel:
                 A_prime = sum(eps_conc_products)
                 Fk = (1 - 10 ** (-self.symbols['l'] * A_prime)) / A_prime
                 self.symbols['explicit_Fk'] = Fk
+                self.explicit_Fk_equation = Eq(self.symbols['Fk'], Fk)  
                 eq_full = eq_full.subs(self.symbols['Fk'], Fk)
 
             self.symbols['equations'].append(eq_full)
             self.symbols['equations_Fk'].append(eq_Fk)
 
+        self.create_flux_equations()
+
 
     def simulate_model(self, rate_constants: Union[List, Tuple, np.ndarray],
                        initial_concentrations: Union[List, Tuple, np.ndarray],
                        substitutions: Union[None, List, Tuple, np.ndarray] = None, 
+                       epsilons: Union[None, List, Tuple, np.ndarray] = None,
                        constant_compartments: Union[None, List[str], Tuple[str]] = None,
-                       t_max: Union[float, int] = 1e3, t_points: int = 1000, flux: Union[float, Iterable] = 1e-8,
-                       l: float = 1, epsilon: float = 1e5, use_SS_approx: bool = True, ODE_solver: str = 'Radau', 
+                       t_max: Union[float, int] = 1e3, t_points: int = 1000, J0: Union[float, Iterable] = 1e-8,
+                       gaussian_FWHM: None | float = None, square_pulse_width: None | float = None,
+                       l: float = 1, use_SS_approx: bool = True, ODE_solver: str = 'Radau', 
                        plot_separately: bool = True,  figsize: Union[tuple, list] = (6, 3), yscale: str = 'linear',
                        cmap: str = 'plasma', lw: float = 2, legend_fontsize: int = 10, legend_labelspacing: float = 0,
                        legend_loc: str = 'best', legend_bbox_to_anchor: Union[tuple, None] = None, 
@@ -902,6 +1000,7 @@ class PhotoKineticSymbolicModel:
 
         comps = self.get_compartments()
         n = len(comps)
+        n_abs = len(self.symbols['epsilons'])
         use_SS_approx = use_SS_approx and len(self.last_SS_solution['SS_eqs'].values()) > 0
 
         # find the number of arrays in the rate_constant array
@@ -909,7 +1008,8 @@ class PhotoKineticSymbolicModel:
 
         assert len(initial_concentrations) == n, "Length of initial_concentrations must match the number of compartments."
         assert len(rate_constants) == n_rates, "Length of rate_constants must match the number of rate constants."
-
+        if n_abs > 0:
+            assert len(epsilons) == n_abs, "Length of epsilons must match the number of absorbing compartments."
         # in windows, longdouble is just float64, so this will not have an effect
         # https://stackoverflow.com/questions/29820829/cannot-use-128bit-float-in-python-on-64bit-architecture
         dtype = np.longdouble if precise_simulation else np.float64
@@ -919,15 +1019,16 @@ class PhotoKineticSymbolicModel:
         rates, idx_iter_rates = get_matrix(rate_constants)
         init_c, idx_iter_init_c = get_matrix(initial_concentrations)
         subs, idx_subs = get_matrix(substitutions)
+        eps, idx_iter_eps = get_matrix(epsilons)
 
         rates = np.asarray(rates, dtype=dtype)
         init_c = np.asarray(init_c, dtype=dtype)
         subs = np.asarray(subs, dtype=dtype)
+        eps = np.asarray(eps, dtype=dtype)
 
-        iterable_flux = np.iterable(flux)
-        flux = np.asarray(flux, dtype=dtype) if iterable_flux else np.asarray([flux], dtype=dtype) 
+        J0 = np.asarray(J0, dtype=dtype) if np.iterable(J0) else np.asarray([J0], dtype=dtype) 
         
-        k = max(rates.shape[0], init_c.shape[0], subs.shape[0], flux.shape[0])  # number of inner parameters in a all parameter arrays
+        k = max(rates.shape[0], init_c.shape[0], subs.shape[0], J0.shape[0], eps.shape[0])  # number of inner parameters in a all parameter arrays
         
         # tile the other array so the first dimension of both arrays is k
         if rates.shape[0] != k:
@@ -936,31 +1037,47 @@ class PhotoKineticSymbolicModel:
             init_c = np.tile(init_c[0], (k, 1))
         if subs.shape[0] != k:
             subs = np.tile(subs[0], (k, 1))
-        if flux.shape[0] != k:
-            flux = np.tile(flux[0], k)
+        if J0.shape[0] != k:
+            J0 = np.tile(J0[0], k)
+        if eps.shape[0] != k:
+            eps = np.tile(eps[0], (k, 1))
 
         self.C_tensor = None
-        times = np.linspace(0, t_max, int(t_points), dtype=dtype)
+        if self.flux_type == 'Gaussian pulse':
+            assert n_abs > 0, "Gaussian pulse is not allowed for the model without absorbing compartments."
+            assert gaussian_FWHM is not None, "Gaussian FWHM must be specified for Gaussian pulse."
+            assert gaussian_FWHM > 0, "Gaussian FWHM must be positive."
+
+            times = np.linspace(-gaussian_FWHM * 5, t_max, int(t_points), dtype=dtype)
+        elif self.flux_type == 'Square pulse':
+            assert n_abs > 0, "Square pulse is not allowed for the model without absorbing compartments."
+            assert square_pulse_width is not None, "Square pulse width must be specified for square pulse."
+            assert square_pulse_width > 0, "Square pulse width must be positive."
+            times = np.linspace(-square_pulse_width, t_max, int(t_points), dtype=dtype)
+        else:
+            times = np.linspace(0, t_max, int(t_points), dtype=dtype)
 
         # scale rate constants, flux, epsilon and initial_concentrations for less numerial errors in
         # the numerical integration
         coef = 1
         init_c_sc = init_c.copy()
         rates_sc = rates.copy()
+        eps_sc = eps.copy()
         if rescale:
             # scaling coefficient, calculate it as geometric mean from non-zero initial concentrations
             coef = gmean(init_c[init_c > 0])  
             # print(coef)
             init_c_sc /= coef
-            epsilon *= coef
-            flux /= coef
+            eps_sc *= coef
+            J0 /= coef
             # second and higher orders needs to be appropriately scaled, by coef ^ (rate order - 1)
             rates_sc *= coef ** (np.asarray(self._rate_constant_orders, dtype=dtype) - 1)
 
         symbols = self.symbols['rate_constants'] + self.symbols['compartments'] + self.symbols['substitutions'] + \
-                  [self.symbols['flux'], self.symbols['l'], self.symbols['epsilon']]
+                  self.symbols['epsilons'] + [self.symbols['flux'], self.symbols['Fk']]
 
-        sym_eqs = list(self.last_SS_solution['diff_eqs'].values()) if use_SS_approx else self.symbols['equations']
+        # differential equations to be simulated
+        sym_eqs = list(self.last_SS_solution['diff_eqs'].values()) if use_SS_approx else self.symbols['equations_Fk']
 
         # those compartments that will be simulated numerically
         idxs2simulate = list(map(comps.index, self.last_SS_solution['diff_eqs'].keys())) if use_SS_approx else list(np.arange(n, dtype=int))
@@ -971,32 +1088,55 @@ class PhotoKineticSymbolicModel:
             idxs_constant = map(comps.index, filter(lambda c: c in comps, constant_compartments))
             idxs_constant_cast = list(map(idxs2simulate.index, filter(lambda c: c in idxs2simulate, idxs_constant)))
 
+
+        # get indexes of absorbing compartments
+        idxs_abs = list(self.absorbing_compartments.values())
+
         if precise_simulation:
-            d_funcs = []
-            for eq in sym_eqs:
-                d_funcs.append(list(map(lambda term: lambdify(symbols, term, 'numpy'), Add.make_args(eq.rhs))))
+            raise NotImplementedError("Precise simulation is not implemented yet.")
+            # d_funcs = []
+            # for eq in sym_eqs:
+            #     d_funcs.append(list(map(lambda term: lambdify(symbols, term, 'numpy'), Add.make_args(eq.rhs))))
 
-            def dc_dt(t, c, rates, subs, flux, l, epsilon):
-                _c = np.empty(n)  # need to cast the concentations to have the original size of the compartments
-                _c[idxs2simulate] = c
+            # def dc_dt(t, c, rates, subs, flux, l, epsilon):
+            #     _c = np.empty(n)  # need to cast the concentations to have the original size of the compartments
+            #     _c[idxs2simulate] = c
 
-                solution = np.empty(len(d_funcs))
-                for i, lambd_list in enumerate(d_funcs):
-                    ev_terms = [f(*rates, *_c, *subs, flux, l, epsilon) for f in lambd_list]
-                    # sum the sorted terms from lowest to highest
-                    ev_terms.sort(key=lambda value: abs(value))
-                    solution[i] = sum(ev_terms)
+            #     solution = np.empty(len(d_funcs))
+            #     for i, lambd_list in enumerate(d_funcs):
+            #         ev_terms = [f(*rates, *_c, *subs, flux, l, epsilon) for f in lambd_list]
+            #         # sum the sorted terms from lowest to highest
+            #         ev_terms.sort(key=lambda value: abs(value))
+            #         solution[i] = sum(ev_terms)
 
-                solution[idxs_constant_cast] = 0  # set the change of constant compartments to zero
+            #     solution[idxs_constant_cast] = 0  # set the change of constant compartments to zero
 
-                return solution                
+            #     return solution                
         else:
             d_funcs = list(map(lambda eq: lambdify(symbols, eq.rhs, 'numpy'), sym_eqs))
-            def dc_dt(t, c, rates, subs, flux, l, epsilon):
+
+            def J(t, J0):
+                if self.flux_type == 'Gaussian pulse':
+                    return gaussian(t, gaussian_FWHM, J0)
+                elif self.flux_type == 'Square pulse':
+                    return square(t, square_pulse_width, J0)
+                else:
+                    return J0
+
+
+            def dc_dt(t, c, rates, subs, epsilons, J0, l):
                 _c = np.empty(n)  # need to cast the concentations to have the original size of the compartments
                 _c[idxs2simulate] = c
 
-                solution = np.asarray([f(*rates, *_c, *subs, flux, l, epsilon) for f in d_funcs])
+                # if we have absorbing compartments, we need to calculate the photokinetic factor
+                Fk = 0
+                _J = 0
+                if n_abs > 0:
+                    A_prime = np.sum(epsilons * _c[idxs_abs])
+                    Fk = photokin_factor(A_prime, l)
+                    _J = J(t, J0)
+
+                solution = np.asarray([f(*rates, *_c, *subs, *epsilons, _J, Fk) for f in d_funcs])
                 solution[idxs_constant_cast] = 0  # set the change of constant compartments to zero
 
                 return solution
@@ -1007,16 +1147,17 @@ class PhotoKineticSymbolicModel:
             # numerically integrate
             # https://docs.scipy.org/doc/scipy/reference/generated/scipy.integrate.solve_ivp.html#scipy.integrate.solve_ivp
             sol = solve_ivp(dc_dt, (0, t_max), init_c_sc[i, idxs2simulate], method=ODE_solver, vectorized=False, dense_output=True,
-                    args=(rates_sc[i, :], subs[i, :], flux[i], l, epsilon))
+                    args=(rates_sc[i, :], subs[i, :], eps_sc[i, :], J0[i], l))
 
             C[i, idxs2simulate, :] = sol.sol(times)  # evaluate at dense time points
 
             # calculate the SS concentrations from the solution of diff. eq.
             if use_SS_approx:
-                for comp, eq in self.last_SS_solution['SS_eqs'].items():
-                    j = comps.index(comp)
-                    f = lambdify(symbols, eq.rhs, 'numpy')
-                    C[i, j, :] = f(*rates_sc[i, :], *list(C[i]), *subs[i, :], flux[i], l, epsilon)
+                pass
+                # for comp, eq in self.last_SS_solution['SS_eqs'].items():
+                #     j = comps.index(comp)
+                #     f = lambdify(symbols, eq.rhs, 'numpy')
+                #     C[i, j, :] = f(*rates_sc[i, :], *list(C[i]), *subs[i, :], J0[i], l, epsilon)
 
         # scale the traces back to correct values
         C *= coef
@@ -1040,7 +1181,7 @@ class PhotoKineticSymbolicModel:
             text_rates = ', '.join([format_rate_constant(i, j) for j in idx_iter_rates])
             text_subs = ', '.join([f"{self.symbols['substitutions'][j]}={format_number_latex(subs[i, j], sig_figures)}" for j in idx_subs])
             text_init = ', '.join([f"[\\mathrm{{{comps[j]}}}]_0={format_number_latex(init_c[i, j], sig_figures)}\\ {self.concentration_unit}" for j in idx_iter_init_c])
-            text_flux = f"J={format_number_latex(flux[i] * coef, sig_figures)}\\ {self.concentration_unit}\\ s^{{-1}}" if iterable_flux else ''
+            text_flux = f"J={format_number_latex(J0[i] * coef, sig_figures)}\\ {self.concentration_unit}\\ s^{{-1}}" if np.iterable(J0) else ''
 
             # combine texts and remove empty entries (in case the the texts are empty)
             par_names.append('; '.join(filter(None, [text_rates, text_subs, text_init, text_flux])))
@@ -1063,13 +1204,25 @@ class PhotoKineticSymbolicModel:
 
         # plot the results
         if plot_separately:
-            n_rows = n - len(idxs_constant_cast)
+            n_rows = n - len(idxs_constant_cast) + 1
             figsize = (figsize[0] , figsize[1] * n_rows)
             fig, axes = plt.subplots(n_rows if stack_plots_in_rows else 1, 1 if stack_plots_in_rows else n_rows, figsize=figsize, sharex=True)
 
+            ax = axes[0]
+
+            if self.flux_type == 'Continuous':
+                J0 = J0 * np.ones_like(times)
+
+            ax.plot(times_scaled, J(times, J0) * coef, label='J', lw=lw, color="black")
+            ax.set_title('$J(t)$')
+            ax.tick_params(axis='both', which='major', direction='in')
+            ax.tick_params(axis='both', which='minor', direction='in')
+            ax.xaxis.set_ticks_position('both')
+            ax.yaxis.set_ticks_position('both')
+
             # colormap for inner parameters
             cmap = cm.get_cmap(cmap)
-            for i, (comp, trace, ax) in enumerate(zip(comps_cast, traces_cast, axes)):
+            for i, (comp, trace, ax) in enumerate(zip(comps_cast, traces_cast, axes[1:])):
                 for j in range(k):
                     label = '' if par_names[j] == '' else f'${par_names[j]}$'
                     ax.plot(times_scaled, trace[j], label=label if i == 0 else '', lw=lw, color=cmap(j / trace.shape[0]))

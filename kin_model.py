@@ -10,7 +10,7 @@ from scipy.stats.mstats import gmean
 
 from numba import vectorize
 
-from typing import Iterable, List, Union, Tuple
+from typing import Callable, Iterable, List, Union, Tuple
 
 COLORS = ['blue', 'red', 'green', 'orange', 'black', 'yellow']
 
@@ -163,7 +163,7 @@ def square(times: np.ndarray | float, sw: float = 1, J0: float = 1) -> np.ndarra
     """
     Returns the value of the square pulse at a given time.
     """
-    return J0 * (times >= 0) & (times <= sw)
+    return J0 * ((times >= 0) & (times <= sw))
 
 
 def get_time_unit(time: float) -> Tuple[float, str]:
@@ -245,6 +245,57 @@ def format_time_latex(number: float, sig_figures: int = 3):
         return f'{num} \\times 10^{{{int(exponent)}}} {unit}'
 
     return f'{formatted_num} {unit}'
+
+
+def ode_integrate(func: Callable, y0: np.ndarray | float, times: np.ndarray, method: str = 'Radau', 
+                args: tuple | None = None, pulse_max_step: float = np.inf, pulse_duration: float | None = None,
+                atol: float = 1e-6, rtol: float = 1e-3):
+    """
+    Integrates the ODE system using the specified method.
+
+    Parameters
+    ----------
+    func : Callable
+        The function to integrate.
+    y0 : np.ndarray | float
+        The initial condition.
+    times : np.ndarray
+        The times to integrate the ODE system.
+    method : str
+        Name of the ODE solver used to numerically simulate the model. Default 'Radau'. Available options are:
+        'RK45', 'RK23', 'DOP853', 'Radau', 'BDF', 'LSODA'.
+    args : tuple | None
+        The arguments to pass to the function.
+    pulse_max_step : float | None
+        The maximum step size in the integration of the region of pulse.
+    pulse_duration : float | None
+        The duration of the pulse. Starts from the beginning.
+    atol : float | None
+        The absolute tolerance for the integration.
+    rtol : float | None
+        The relative tolerance for the integration.
+    """
+
+    if pulse_duration is None:
+        sol = solve_ivp(func, (times[0], times[-1]), y0, method=method, vectorized=False, dense_output=False,
+            t_eval=times, max_step=np.inf, args=args, atol=atol, rtol=rtol)
+
+        return sol.y
+
+    else:
+        times_pulse = times[times <= times[0] + pulse_duration]
+        times_rest = times[times_pulse[-1] <= times]
+
+        # times_pulse[-1] == times_rest[0]
+
+        sol_pulse = solve_ivp(func, (times[0], times_pulse[-1]), y0, method=method, vectorized=False, dense_output=False,
+            t_eval=times_pulse, max_step=pulse_max_step, args=args, atol=atol, rtol=rtol)
+
+        sol_rest = solve_ivp(func, (times_rest[0], times[-1]), sol_pulse.y[:, -1], method=method, vectorized=False, dense_output=False,
+            t_eval=times_rest, max_step=np.inf, args=args, atol=atol, rtol=rtol, first_step=pulse_max_step)
+
+        return np.hstack((sol_pulse.y[:, :-1], sol_rest.y))
+
 
 
 class PhotoKineticSymbolicModel:
@@ -1049,13 +1100,20 @@ class PhotoKineticSymbolicModel:
             assert gaussian_FWHM > 0, "Gaussian FWHM must be positive."
 
             times = np.linspace(-gaussian_FWHM * 5, t_max, int(t_points), dtype=dtype)
+            pulse_duration = 8 * gaussian_FWHM
+            max_step = gaussian_FWHM / 20
         elif self.flux_type == 'Square pulse':
             assert n_abs > 0, "Square pulse is not allowed for the model without absorbing compartments."
             assert square_pulse_width is not None, "Square pulse width must be specified for square pulse."
             assert square_pulse_width > 0, "Square pulse width must be positive."
-            times = np.linspace(-square_pulse_width, t_max, int(t_points), dtype=dtype)
+            times = np.linspace(0, t_max, int(t_points), dtype=dtype)
+            pulse_duration = None
+            max_step = np.inf
         else:
             times = np.linspace(0, t_max, int(t_points), dtype=dtype)
+            pulse_duration = None
+            max_step = np.inf
+
 
         # scale rate constants, flux, epsilon and initial_concentrations for less numerial errors in
         # the numerical integration
@@ -1063,16 +1121,21 @@ class PhotoKineticSymbolicModel:
         init_c_sc = init_c.copy()
         rates_sc = rates.copy()
         eps_sc = eps.copy()
+        J0_sc = J0.copy()
+
         if rescale:
             # scaling coefficient, calculate it as geometric mean from non-zero initial concentrations
             coef = gmean(init_c[init_c > 0])  
             # print(coef)
             init_c_sc /= coef
             eps_sc *= coef
-            J0 /= coef
+            J0_sc /= coef
             # second and higher orders needs to be appropriately scaled, by coef ^ (rate order - 1)
             rates_sc *= coef ** (np.asarray(self._rate_constant_orders, dtype=dtype) - 1)
 
+        # symbols = self.symbols['rate_constants'] + self.symbols['compartments'] + self.symbols['substitutions'] + \
+        #           self.symbols['epsilons'] + [self.symbols['flux'], self.symbols['l']]   # , self.symbols['Fk']
+        
         symbols = self.symbols['rate_constants'] + self.symbols['compartments'] + self.symbols['substitutions'] + \
                   self.symbols['epsilons'] + [self.symbols['flux'], self.symbols['Fk']]
 
@@ -1091,6 +1154,13 @@ class PhotoKineticSymbolicModel:
 
         # get indexes of absorbing compartments
         idxs_abs = list(self.absorbing_compartments.values())
+
+        if self.flux_type == 'Gaussian pulse':
+            J = lambda t, J0: gaussian(t, gaussian_FWHM, J0)
+        elif self.flux_type == 'Square pulse':
+            J = lambda t, J0: square(t, square_pulse_width, J0)
+        else:
+            J = lambda t, J0: J0
 
         if precise_simulation:
             raise NotImplementedError("Precise simulation is not implemented yet.")
@@ -1115,20 +1185,13 @@ class PhotoKineticSymbolicModel:
         else:
             d_funcs = list(map(lambda eq: lambdify(symbols, eq.rhs, 'numpy'), sym_eqs))
 
-            def J(t, J0):
-                if self.flux_type == 'Gaussian pulse':
-                    return gaussian(t, gaussian_FWHM, J0)
-                elif self.flux_type == 'Square pulse':
-                    return square(t, square_pulse_width, J0)
-                else:
-                    return J0
-
-
             def dc_dt(t, c, rates, subs, epsilons, J0, l):
                 _c = np.empty(n)  # need to cast the concentations to have the original size of the compartments
                 _c[idxs2simulate] = c
 
                 # if we have absorbing compartments, we need to calculate the photokinetic factor
+                # TODO, approximate Fk, ignore the concentrations of steady state-compartments 
+                # as the concentrations are very low
                 Fk = 0
                 _J = 0
                 if n_abs > 0:
@@ -1137,6 +1200,8 @@ class PhotoKineticSymbolicModel:
                     _J = J(t, J0)
 
                 solution = np.asarray([f(*rates, *_c, *subs, *epsilons, _J, Fk) for f in d_funcs])
+                # solution = np.asarray([f(*rates, *_c, *subs, *epsilons, J(t, J0), l) for f in d_funcs])
+
                 solution[idxs_constant_cast] = 0  # set the change of constant compartments to zero
 
                 return solution
@@ -1145,11 +1210,8 @@ class PhotoKineticSymbolicModel:
 
         for i in range(k):
             # numerically integrate
-            # https://docs.scipy.org/doc/scipy/reference/generated/scipy.integrate.solve_ivp.html#scipy.integrate.solve_ivp
-            sol = solve_ivp(dc_dt, (0, t_max), init_c_sc[i, idxs2simulate], method=ODE_solver, vectorized=False, dense_output=True,
-                    args=(rates_sc[i, :], subs[i, :], eps_sc[i, :], J0[i], l))
-
-            C[i, idxs2simulate, :] = sol.sol(times)  # evaluate at dense time points
+            C[i, idxs2simulate, :] = ode_integrate(dc_dt, init_c_sc[i, idxs2simulate], times, method=ODE_solver, rtol=1e-6, atol=1e-9,
+                    pulse_max_step=max_step, pulse_duration=pulse_duration, args=(rates_sc[i, :], subs[i, :], eps_sc[i, :], J0_sc[i], l))
 
             # calculate the SS concentrations from the solution of diff. eq.
             if use_SS_approx:
@@ -1181,7 +1243,7 @@ class PhotoKineticSymbolicModel:
             text_rates = ', '.join([format_rate_constant(i, j) for j in idx_iter_rates])
             text_subs = ', '.join([f"{self.symbols['substitutions'][j]}={format_number_latex(subs[i, j], sig_figures)}" for j in idx_subs])
             text_init = ', '.join([f"[\\mathrm{{{comps[j]}}}]_0={format_number_latex(init_c[i, j], sig_figures)}\\ {self.concentration_unit}" for j in idx_iter_init_c])
-            text_flux = f"J={format_number_latex(J0[i] * coef, sig_figures)}\\ {self.concentration_unit}\\ s^{{-1}}" if np.iterable(J0) else ''
+            text_flux = f"J={format_number_latex(J0[i], sig_figures)}\\ {self.concentration_unit}\\ s^{{-1}}" if np.iterable(J0) else ''
 
             # combine texts and remove empty entries (in case the the texts are empty)
             par_names.append('; '.join(filter(None, [text_rates, text_subs, text_init, text_flux])))
@@ -1202,27 +1264,29 @@ class PhotoKineticSymbolicModel:
         # stack_plots_in_rows:
         #     Default True.
 
+        num = 1 if self.flux_type != 'Continuous' else 0
+
         # plot the results
         if plot_separately:
-            n_rows = n - len(idxs_constant_cast) + 1
+            n_rows = n - len(idxs_constant_cast) + num
             figsize = (figsize[0] , figsize[1] * n_rows)
             fig, axes = plt.subplots(n_rows if stack_plots_in_rows else 1, 1 if stack_plots_in_rows else n_rows, figsize=figsize, sharex=True)
 
-            ax = axes[0]
-
-            if self.flux_type == 'Continuous':
-                J0 = J0 * np.ones_like(times)
-
-            ax.plot(times_scaled, J(times, J0) * coef, label='J', lw=lw, color="black")
-            ax.set_title('$J(t)$')
-            ax.tick_params(axis='both', which='major', direction='in')
-            ax.tick_params(axis='both', which='minor', direction='in')
-            ax.xaxis.set_ticks_position('both')
-            ax.yaxis.set_ticks_position('both')
+            cmap = cm.get_cmap(cmap)
+            if self.flux_type != 'Continuous':
+                ax = axes[0]
+                for j in range(k):
+                    # label = '' if par_names[j] == '' else f'${par_names[j]}$'
+                    ax.plot(times_scaled, J(times, J0[j]), label='J', lw=lw, color=cmap(j / J0.shape[0]))
+                ax.set_title('$J(t)$')
+                ax.set_yscale(yscale)
+                ax.tick_params(axis='both', which='major', direction='in')
+                ax.tick_params(axis='both', which='minor', direction='in')
+                ax.xaxis.set_ticks_position('both')
+                ax.yaxis.set_ticks_position('both')
 
             # colormap for inner parameters
-            cmap = cm.get_cmap(cmap)
-            for i, (comp, trace, ax) in enumerate(zip(comps_cast, traces_cast, axes[1:])):
+            for i, (comp, trace, ax) in enumerate(zip(comps_cast, traces_cast, axes[num:])):
                 for j in range(k):
                     label = '' if par_names[j] == '' else f'${par_names[j]}$'
                     ax.plot(times_scaled, trace[j], label=label if i == 0 else '', lw=lw, color=cmap(j / trace.shape[0]))

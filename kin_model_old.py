@@ -398,8 +398,7 @@ class PhotoKineticSymbolicModel:
                             explicit_Fk=None,  # explicit full Fk = (1 - 10 ** -A) / A
                             l=None,
                             epsilons=[],
-                            substitutions=[],
-                            other_symbols=[])  # contains the symbols used for substitutions
+                            substitutions=[])  # contains the symbols used for substitutions
 
         # orders of the rate constants in the model
         self._rate_constant_orders: list[int] = []
@@ -410,16 +409,13 @@ class PhotoKineticSymbolicModel:
         self.times = None  # times unscaled
         self.A_tensor = None  # absorbance tensor
         self.concentration_unit = concentration_unit
-        self.last_parameter_matrix: np.ndarray | None = None
-
+        self.last_parameter_matrices: dict[str, np.ndarray] = {}
 
     def create_flux_equations(self):
         # Flux_types = ['Gaussian pulse', 'Square pulse', 'Continuous']
 
         sigma, t, sw, J0 = symbols("\\sigma t s_w J_0")
         FWHM = symbols("FWHM")
-
-        self.symbols['other_symbols'] = [sw, J0, FWHM]
 
         g = J0 * exp( - self.symbols['time'] ** 2 / (2 * sigma ** 2)) / (sigma * sqrt(2 * pi)) 
         g = g.subs(sigma, FWHM / (2 * sqrt(2 * ln(2)))) # substitute sigma with FWHM
@@ -937,46 +933,21 @@ class PhotoKineticSymbolicModel:
 
         self.create_flux_equations()
 
-    def get_symbols_for_simulation_map(self) -> dict[str, Symbol]:
-        """
 
-         self.symbols = dict(compartments=[],
-            equations=[],  # contains diff equations in full form
-            equations_Fk=[], # contains diff equations with symbol Fk instead of (1 - 10 ** -A) / A
-            rate_constants=[],
-            time=None,  # t
-            flux=None,    # J(t)
-            Fk=None,  # Photokinetic factor
-            explicit_Fk=None,  # explicit full Fk = (1 - 10 ** -A) / A
-            l=None,
-            epsilons=[],
-            substitutions=[])  # contains the symbols used for substitutions
-
-            last n names in dictionary are initial concentrations
-        
-        """
-
-        d = dict(l=self.symbols['l'])
-
-        d.update({f"{str(s)[4:]}": s for s in self.symbols['epsilons']})
-        d.update({str(s): s for s in self.symbols['rate_constants']})
-        d.update({str(s): s for s in self.symbols['substitutions']})
-        d.update({str(s): s for s in self.symbols['other_symbols']})
-        d.update({f"{str(s)[:-3]}_0": s for s in self.symbols['compartments']})
-
-        return d
-
-
-    def simulate_model(self, parameters: dict[str, Union[float, Iterable]],
+    def simulate_model(self, rate_constants: Union[List, Tuple, np.ndarray],
+                       initial_concentrations: Union[List, Tuple, np.ndarray],
+                       substitutions: Union[None, List, Tuple, np.ndarray] = None, 
+                       epsilons: Union[None, List, Tuple, np.ndarray] = None,
                        constant_compartments: Union[None, List[str], Tuple[str]] = None,
-                       t_max: Union[float, int] = 1e3, t_points: int = 1000, 
-                        use_SS_approx: bool = True, ODE_solver: str = 'Radau', 
+                       t_max: Union[float, int] = 1e3, t_points: int = 1000, J0: Union[float, Iterable] = 1e-8,
+                       gaussian_FWHM: Union[float, Iterable] = 1, square_pulse_width: Union[float, Iterable] = 1,
+                       l: float = 1, use_SS_approx: bool = True, ODE_solver: str = 'Radau', 
                        plot_separately: bool = True,  figsize: Union[tuple, list] = (6, 3), yscale: str = 'linear',
                        cmap: str = 'plasma', lw: float = 2, legend_fontsize: int = 10, legend_labelspacing: float = 0,
                        legend_loc: str = 'best', legend_bbox_to_anchor: Union[tuple, None] = None, 
                        stack_plots_in_rows: bool = True, filepath: Union[None, str] = None, dpi: int = 300, 
                        transparent: bool = False, plot_results: bool = True, rescale: bool = True,
-                       auto_convert_time_units: bool = True, sig_figures: int = 3):
+                       auto_convert_time_units: bool = True, sig_figures: int = 3, precise_simulation: bool = False):
         """
         Simulates the current model and plots the results if ``plot_results`` is True (default True). Parameters
         rate_constant and initial_concentrations can contain iterables. In this case, the model will be simulated
@@ -986,9 +957,24 @@ class PhotoKineticSymbolicModel:
 
         Parameters
         ----------
-        parameters: dict[str, Union[float, Iterable]]
-            Dictionary of parameters. The keys are the names of the parameters and the values are the values of the parameters.
-            The values can be floats or iterables. If iterables, the model will be simulated for each of the value in the iterable arrays.
+        rate_constants : 
+            List/tuple of rate constants. They have to occur in the same order as are saved in the model.
+            Please, check the order in ``symbols['rate_constants']`` attribute. Rate constants can contain
+            iterables (list, tuple, np.ndarray). In this case the model will be simulated for each of the parameter in
+            the iterable. It can contain more that one iterables, in this case, length of iterable arrays must 
+            be the same.
+        initial_concentrations : 
+            List/tuple of initial concentrations. They have to occur in the same order as are saved in the model.
+            Please, check the order in ``symbols['compartments']`` attribute. Initial concentrations can contain
+            iterables (list, tuple, np.ndarray). In this case the model will be simulated for each of the parameter in
+            the iterable. It can contain more that one iterables, in this case, length of iterable arrays must 
+            be the same.
+        substitutions :
+            List/tuple of substitutions if used during steady state approximation. They have to occur in the same 
+            order as are saved in the model. Please, check the order in ``symbols['substitutions']`` attribute. 
+            Subsitutions can contain iterables (list, tuple, np.ndarray). In this case the model will be simulate
+            for each of the parameter in the iterable. It can contain more that one iterables, in this case,
+            length of iterable arrays must be the same.
         constant_compartments: list of strings
             If specified (default None), the values of these compartments will be constant and the value from
             initial_concentration array will be used. Constant compartments will not be plotted. If the SS 
@@ -998,6 +984,12 @@ class PhotoKineticSymbolicModel:
             Maximum time in seconds in the range of time points the model will be simulated for. Optional. Default 1e3 s.
         t_points: 
             Number of time points used to simulate the model for. Optional. Default 1000.
+        J0: 
+            Incident photon flux. Optional. Default 1e-8.
+        l: 
+            Length of the cuvette. Optional. Default 1.
+        epsilon: 
+            Molar absorption coefficient at the irradiation wavelength. Optional. Default 1e5.
         use_SS_approx: 
             If True (default True), the equations from SS approximation will be used to simulate the model
             (only if it was performed for the model).
@@ -1045,6 +1037,12 @@ class PhotoKineticSymbolicModel:
         sig_figures : 
             Number of significant figures the rate constants, initial concentrations and/or substitutions will be rounded to 
             if displayed in the plot.
+        precise_simulation :
+            If True, tries to use the higher precision float, np.longdouble. On windows build, this will be just regular np.float64, but with
+            Anaconda installation and on other OS, it should be np.float128, which is 80 bit float padded to 96 bits (x86-32) or 128 bits
+            (x86-64). https://stackoverflow.com/questions/9062562/what-is-the-internal-precision-of-numpy-float128
+            Also, it evaluates the terms in differential equations separately and then sums them from lowest to highest (in absolute values) 
+            to minimize the summation errors.
         """
         
         if len(self.symbols['equations']) == 0:
@@ -1052,128 +1050,114 @@ class PhotoKineticSymbolicModel:
 
         comps = self.get_compartments()
         n = len(comps)
-
-        sim_map = self.get_symbols_for_simulation_map()
-
-        # symbols for lamdify functions
-        symbols_lamdify_dict = sim_map.copy()
-        del symbols_lamdify_dict['l']
-        del symbols_lamdify_dict['J_0']
-        del symbols_lamdify_dict['FWHM']
-        del symbols_lamdify_dict['s_w']
-
-        sim_key_list = list(sim_map.keys())
-        sym_map_idxs = list(map(sim_key_list.index, list(symbols_lamdify_dict.keys())))
-
-        symbols_lamdify_dict[str(self.symbols['flux'])] = self.symbols['flux']
-        symbols_lamdify_dict[str(self.symbols['Fk'])] = self.symbols['Fk']
-
-        symbols_lamdify = list(symbols_lamdify_dict.values())
-
-        init_conc_names = [key for key in list(sim_map.keys())[-n:]]
-
         n_abs = len(self.symbols['epsilons'])
         use_SS_approx = use_SS_approx and len(self.last_SS_solution['SS_eqs'].values()) > 0
 
-        params = {key: None for key in sim_map.keys()}
-        params['l'] = 1
-        params['J_0'] = 1e-5
-        params['FWHM'] = 1
-        params['s_w'] = 1
+        # find the number of arrays in the rate_constant array
+        n_rates = len(self.symbols['rate_constants'])
 
-        for key, value in parameters.items():
-            if key in params.keys():
-                params[key] = value
+        assert len(initial_concentrations) == n, "Length of initial_concentrations must match the number of compartments."
+        assert len(rate_constants) == n_rates, "Length of rate_constants must match the number of rate constants."
+        if n_abs > 0:
+            assert len(epsilons) == n_abs, "Length of epsilons must match the number of absorbing compartments."
+        # in windows, longdouble is just float64, so this will not have an effect
+        # https://stackoverflow.com/questions/29820829/cannot-use-128bit-float-in-python-on-64bit-architecture
+        dtype = np.longdouble if precise_simulation else np.float64
 
-        not_specified = []
-        for key, value in parameters.items():
-            if value is None:
-                not_specified.append(key)
+        # shape of matrices are k x l where k is number of parameters within the array to simulated
+        # and l number of parameters (n_rates or n)
+        substitutions = substitutions if use_SS_approx else None
 
-        assert len(not_specified) == 0, f"Parameters {not_specified} must be specified."
-    
-        assert params['s_w'] > 0, "Square pulse width must be positive."
-        assert params['FWHM'] > 0, "Gaussian FWHM must be positive."
-        assert params['J_0'] > 0, "Incident photon flux must be positive."
-        assert params['l'] > 0, "Path length must be positive."
+        rates, idx_iter_rates = get_matrix(rate_constants)
+        init_c, idx_iter_init_c = get_matrix(initial_concentrations)
+        subs, idx_subs = get_matrix(substitutions)
+        eps, idx_iter_eps = get_matrix(epsilons)
 
-        # find the maximal length of params which are iterable
-        k = max([len(v) for v in params.values() if np.iterable(v)])
-        par_matrix = np.zeros((len(params), k))
+        rates = np.asarray(rates, dtype=dtype)
+        init_c = np.asarray(init_c, dtype=dtype)
+        subs = np.asarray(subs, dtype=dtype)
+        eps = np.asarray(eps, dtype=dtype)
 
-        par_matrix_index_dict = {key: i for i, key in enumerate(params.keys())}
-        inv_par_matrix_index_dict = {i: key for i, key in enumerate(params.keys())}
+        J0 = np.asarray(J0, dtype=dtype) if np.iterable(J0) else np.asarray([J0], dtype=dtype)
+        n_J0 = J0.shape[0]
 
-        for i, (key, value) in enumerate(params.items()):
-            if np.iterable(value):
-                assert len(value) == k, f"Length of {key} must match the length of all iterables."
-            par_matrix[i, :] = value
+        square_pulse_width = np.asarray(square_pulse_width, dtype=dtype) if np.iterable(square_pulse_width) else np.asarray([square_pulse_width], dtype=dtype)
+        n_square_pulse_width = square_pulse_width.shape[0]
 
+        gaussian_FWHM = np.asarray(gaussian_FWHM, dtype=dtype) if np.iterable(gaussian_FWHM) else np.asarray([gaussian_FWHM], dtype=dtype)
+        n_gaussian_FWHM = gaussian_FWHM.shape[0]
+        
+        k = max(rates.shape[0], init_c.shape[0], subs.shape[0], n_J0, eps.shape[0], n_square_pulse_width, n_gaussian_FWHM)  # number of inner parameters in a all parameter arrays
+        
+        # tile the other array so the first dimension of both arrays is k
+        if rates.shape[0] != k:
+            rates = np.tile(rates[0], (k, 1))
+        if init_c.shape[0] != k:
+            init_c = np.tile(init_c[0], (k, 1))
+        if subs.shape[0] != k:
+            subs = np.tile(subs[0], (k, 1))
+        if J0.shape[0] != k:
+            J0 = np.tile(J0[0], k)
+        if square_pulse_width.shape[0] != k:
+            square_pulse_width = np.tile(square_pulse_width[0], k)
+        if gaussian_FWHM.shape[0] != k:
+            gaussian_FWHM = np.tile(gaussian_FWHM[0], k)
+        if eps.shape[0] != k:
+            eps = np.tile(eps[0], (k, 1))
 
-        get_pars = lambda name: par_matrix[par_matrix_index_dict[name], :]
-        get_number_of_params = lambda name: len(params[name]) if np.iterable(params[name]) else 1
-
-        # create an index map that will map from par_matrix to symbols_lamdify
-
-
-        self.last_parameter_matrix = par_matrix
-
-        dtype = np.float64
-
-        J0s = get_pars('J_0')
-        n_J0 = get_number_of_params('J_0')
-        n_square_pulse_width = get_number_of_params('s_w')
-        n_gaussian_FWHM = get_number_of_params('FWHM')
+        self.last_parameter_matrices['rate_constants'] = rates
+        self.last_parameter_matrices['initial_concentrations'] = init_c
+        self.last_parameter_matrices['substitutions'] = subs
+        self.last_parameter_matrices['epsilons'] = eps
+        self.last_parameter_matrices['J0'] = J0
+        self.last_parameter_matrices['square_pulse_width'] = square_pulse_width
+        self.last_parameter_matrices['gaussian_FWHM'] = gaussian_FWHM
 
         self.C_tensor = None
         if self.flux_type == 'Gaussian pulse':
             assert n_abs > 0, "Gaussian pulse is not allowed for the model without absorbing compartments."
-            fwhms = get_pars('FWHM')
-            times = np.linspace(-fwhms.max() * 3, t_max, int(t_points), dtype=dtype)
-            pulse_duration = min(6 * fwhms.max(), t_max)  # for ivp solver
-            max_step = min(fwhms.min() / 20, t_max / 10)
-            J = lambda t, i: gaussian(t, fwhms[i], J0s[i])
+            # assert gaussian_FWHM is not None, "Gaussian FWHM must be specified for Gaussian pulse."
+            assert gaussian_FWHM[0] > 0, "Gaussian FWHM must be positive."
+
+            times = np.linspace(-gaussian_FWHM.max() * 3, t_max, int(t_points), dtype=dtype)
+            pulse_duration = min(6 * gaussian_FWHM.max(), t_max)  # for ivp solver
+            max_step = min(gaussian_FWHM.min() / 20, t_max / 10)
         elif self.flux_type == 'Square pulse':
             assert n_abs > 0, "Square pulse is not allowed for the model without absorbing compartments."
+            # assert square_pulse_width is not None, "Square pulse width must be specified for square pulse."
+            assert square_pulse_width[0] > 0, "Square pulse width must be positive."
             times = np.linspace(0, t_max, int(t_points), dtype=dtype)
             pulse_duration = None
             max_step = np.inf
-            sw = get_pars('s_w')
-            J = lambda t, i: square(t, sw[i], J0s[i])
         else:
             times = np.linspace(0, t_max, int(t_points), dtype=dtype)
             pulse_duration = None
             max_step = np.inf
-            J = lambda t, i=None: J0s[i] * np.ones_like(t) if isinstance(t, np.ndarray) else J0s[i]
-
 
         self.times = times
-
-        init_c = par_matrix[-n:, :]   # initial concentrations
-        par_matrix_cropped = par_matrix[:-n, :]  # rate constants, flux, epsilon and substitutions
-
         # scale rate constants, flux, epsilon and initial_concentrations for less numerial errors in
         # the numerical integration
-        # coef = 1
-        # init_c_sc = init_c.copy()
-        # rates_sc = rates.copy()
-        # eps_sc = eps.copy()
-        # J0_sc = J0.copy()
+        coef = 1
+        init_c_sc = init_c.copy()
+        rates_sc = rates.copy()
+        eps_sc = eps.copy()
+        J0_sc = J0.copy()
 
-        # if rescale:
-        #     # scaling coefficient, calculate it as geometric mean from non-zero initial concentrations
-        #     coef = gmean(init_c[init_c > 0])  
-        #     # print(coef)
-        #     init_c_sc /= coef
-        #     eps_sc *= coef
-        #     J0_sc /= coef
-        #     # second and higher orders needs to be appropriately scaled, by coef ^ (rate order - 1)
-        #     rates_sc *= coef ** (np.asarray(self._rate_constant_orders, dtype=dtype) - 1)
-        
+        if rescale:
+            # scaling coefficient, calculate it as geometric mean from non-zero initial concentrations
+            coef = gmean(init_c[init_c > 0])  
+            # print(coef)
+            init_c_sc /= coef
+            eps_sc *= coef
+            J0_sc /= coef
+            # second and higher orders needs to be appropriately scaled, by coef ^ (rate order - 1)
+            rates_sc *= coef ** (np.asarray(self._rate_constant_orders, dtype=dtype) - 1)
 
-        
         # symbols = self.symbols['rate_constants'] + self.symbols['compartments'] + self.symbols['substitutions'] + \
-        #           self.symbols['epsilons'] + [self.symbols['flux'], self.symbols['Fk']]
+        #           self.symbols['epsilons'] + [self.symbols['flux'], self.symbols['l']]   # , self.symbols['Fk']
+        
+        symbols = self.symbols['rate_constants'] + self.symbols['compartments'] + self.symbols['substitutions'] + \
+                  self.symbols['epsilons'] + [self.symbols['flux'], self.symbols['Fk']]
 
         # differential equations to be simulated
         sym_eqs = list(self.last_SS_solution['diff_eqs'].values()) if use_SS_approx else self.symbols['equations_Fk']
@@ -1187,41 +1171,69 @@ class PhotoKineticSymbolicModel:
             idxs_constant = map(comps.index, filter(lambda c: c in comps, constant_compartments))
             idxs_constant_cast = list(map(idxs2simulate.index, filter(lambda c: c in idxs2simulate, idxs_constant)))
 
+
         # get indexes of absorbing compartments
         # the same order as in epsilons
         idxs_abs = list(self.absorbing_compartments.values())
 
-        d_funcs = list(map(lambda eq: lambdify(symbols_lamdify, eq.rhs, 'numpy'), sym_eqs))
+        if self.flux_type == 'Gaussian pulse':
+            J = lambda t, J0, i: gaussian(t, gaussian_FWHM[i], J0)
+        elif self.flux_type == 'Square pulse':
+            J = lambda t, J0, i: square(t, square_pulse_width[i], J0)
+        else:
+            def J(t, J0, i=None):
+                return J0 * np.ones_like(t) if isinstance(t, np.ndarray) else J0
 
-        def dc_dt(t, c, i):  # index
-            # only compartments in idxs2simulate are being simulated
-            _c = np.zeros(n)  # need to cast the concentations to have the original size of the compartments
-            _c[idxs2simulate] = c
- 
-            _epsilons = eps_sc[i, :]
+        if precise_simulation:
+            raise NotImplementedError("Precise simulation is not implemented yet.")
+            # d_funcs = []
+            # for eq in sym_eqs:
+            #     d_funcs.append(list(map(lambda term: lambdify(symbols, term, 'numpy'), Add.make_args(eq.rhs))))
 
-            # if we have absorbing compartments, we need to calculate the photokinetic factor
-            # Approximate Fk, ignores the concentrations of steady state-compartments, c of them is set to 0 
-            Fk = 0
-            _J = 0
-            if n_abs > 0:
-                A_prime = np.sum(_epsilons * _c[idxs_abs])
-                Fk = photokin_factor(A_prime, l)
-                _J = J(t, i)
+            # def dc_dt(t, c, rates, subs, flux, l, epsilon):
+            #     _c = np.empty(n)  # need to cast the concentations to have the original size of the compartments
+            #     _c[idxs2simulate] = c
 
-            solution = np.asarray([f(*par_matrix[i, sym_map_idxs], _J, Fk) for f in d_funcs])
-            # solution = np.asarray([f(*rates_sc[i, :], *_c, *subs[i, :], *_epsilons, _J, Fk) for f in d_funcs])
+            #     solution = np.empty(len(d_funcs))
+            #     for i, lambd_list in enumerate(d_funcs):
+            #         ev_terms = [f(*rates, *_c, *subs, flux, l, epsilon) for f in lambd_list]
+            #         # sum the sorted terms from lowest to highest
+            #         ev_terms.sort(key=lambda value: abs(value))
+            #         solution[i] = sum(ev_terms)
 
-            # solution = np.asarray([f(*rates, *_c, *subs, *epsilons, J(t, J0), l) for f in d_funcs])
+            #     solution[idxs_constant_cast] = 0  # set the change of constant compartments to zero
 
-            solution[idxs_constant_cast] = 0  # set the change of constant compartments to zero
+            #     return solution                
+        else:
+            d_funcs = list(map(lambda eq: lambdify(symbols, eq.rhs, 'numpy'), sym_eqs))
 
-            return solution
+            def dc_dt(t, c, i):  # index
+                # only compartments in idxs2simulate are being simulated
+                _c = np.zeros(n)  # need to cast the concentations to have the original size of the compartments
+                _c[idxs2simulate] = c
+
+                _epsilons = eps_sc[i, :]
+
+                # if we have absorbing compartments, we need to calculate the photokinetic factor
+                # Approximate Fk, ignores the concentrations of steady state-compartments, c of them is set to 0 
+                Fk = 0
+                _J = 0
+                if n_abs > 0:
+                    A_prime = np.sum(_epsilons * _c[idxs_abs])
+                    Fk = photokin_factor(A_prime, l)
+                    _J = J(t, J0_sc[i], i)
+
+                solution = np.asarray([f(*rates_sc[i, :], *_c, *subs[i, :], *_epsilons, _J, Fk) for f in d_funcs])
+                # solution = np.asarray([f(*rates, *_c, *subs, *epsilons, J(t, J0), l) for f in d_funcs])
+
+                solution[idxs_constant_cast] = 0  # set the change of constant compartments to zero
+
+                return solution
 
         C = np.zeros((k, n, times.shape[0]))
 
         if use_SS_approx:
-            f_SS = list(map(lambda item: (comps.index(item[0]), lambdify(symbols_lamdify, item[1].rhs, 'numpy')), self.last_SS_solution['SS_eqs'].items()))
+            f_SS = list(map(lambda item: (comps.index(item[0]), lambdify(symbols, item[1].rhs, 'numpy')), self.last_SS_solution['SS_eqs'].items()))
 
         for i in range(k):
             # numerically integrate
@@ -1416,7 +1428,6 @@ class PhotoKineticSymbolicModel:
                   f"rate: {rate}")  # {rate=} does not work in python 3.7 on colab
 
 
-
 if __name__ == '__main__':
 
 
@@ -1439,29 +1450,21 @@ if __name__ == '__main__':
     model.pprint_equations()  # print the ODEs
     # model.pprint_equations(True)  # print the ODEs
 
-    print(model.get_symbols_for_simulation_map())
+    model.steady_state_approx(['^1S'])
 
-    sim_map = model.get_symbols_for_simulation_map()
-    n = len(model.get_compartments())
-
-    init_conc_names = [key for key in list(sim_map.keys())[-n:]]
-    print(init_conc_names)
-
-    # model.steady_state_approx(['^1S'])
-
-    # print('\n')
+    print('\n')
 
 
-    # rate_constants = [ 1e9, 1e8]  # in the order of k_s, k_r
+    rate_constants = [ 1e9, 1e8]  # in the order of k_s, k_r
 
-    # initial_concentrations = [ 2e-5, 0, 0] # in the order of GS, ^1S, P
-    # eps = [ 1e5  ]  # in the order of tau_F, phi_r
+    initial_concentrations = [ 2e-5, 0, 0] # in the order of GS, ^1S, P
+    eps = [ 1e5  ]  # in the order of tau_F, phi_r
 
-    # J0 = 9e-6
-    # t_max = 60
+    J0 = 9e-6
+    t_max = 60
 
-    # model.simulate_model(rate_constants, initial_concentrations, epsilons=eps, t_max=t_max, J0=J0, l=1, 
-    # plot_separately=True, ODE_solver="Radau", gaussian_FWHM=5e-10, square_pulse_width=1e-9, t_points=1e3, yscale='linear')
+    model.simulate_model(rate_constants, initial_concentrations, epsilons=eps, t_max=t_max, J0=J0, l=1, 
+    plot_separately=True, ODE_solver="Radau", gaussian_FWHM=5e-10, square_pulse_width=1e-9, t_points=1e3, yscale='linear')
 
 
     # model = PhotoKineticSymbolicModel.from_text(model)
@@ -1480,6 +1483,15 @@ if __name__ == '__main__':
     # ^1S --> P            // k_r  # formation of the photoproduct from the singlet state
     # """
 
+    # str_model = """
+    # # ^1RB^{2-*} --> RB^{2-}                                        // k_s  # singlet decay to ground state
+    # # ^1RB^{2-*} --> ^3RB^{2-*} --> RB^{2-}                         // k_{isc} ; k_d
+    # # ^3RB^{2-*} + RB^{2-} --> 2RB^{2-}                             // k_{sq}
+    # # ^3RB^{2-*} + RB^{2-} --> RB^{\\bullet -} + RB^{\\bullet 3-}   // k_{redox*}
+    # # 2^3RB^{2-*} --> ^1RB^{2-*}  + RB^{2-}                         // k_{TT}  # triplet-triplet annihilation
+    # 2^3RB^{2-*} --> RB^{\\bullet -}  + RB^{\\bullet 3-}           // k_{redox**}
+    # RB^{\\bullet -}  + RB^{\\bullet 3-} --> 2 RB^{2-}             // k_{-eT}  # back electron transfer
+    # """
 
     # # instantiate the model
     # model = PhotoKineticSymbolicModel.from_text(str_model)
@@ -1488,4 +1500,64 @@ if __name__ == '__main__':
     # # A + B --> C + D + E          // k_1  # absorption and singlet state decay
     # # A^{2+} + F -->              // k_d
     # # """
+
+    # # # instantiate the model
+    # # model = PhotoKineticSymbolicModel.from_text(model)
+
+
+    # # model.print_model()  # print the model
+    # model.pprint_equations()  # print the ODEs
+    # # print('\n')
+
+    # text_model = """
+    # GS -hv-> ^1S --> GS  // k_s  # absorption and decay back to ground state
+    # ^1S --> P            // k_r  # formation of the photoproduct from the singlet state
+    # """
+
+    # # instantiate the model
+    # model = PhotoKineticSymbolicModel.from_text(text_model)
+    # print(model.print_model())  # print the model
+    # model.pprint_equations()  # print the ODEs
+
+    # ks, kr = model.symbols['rate_constants']
+    # phi_r, tau_F = symbols('\\phi_r, \\tau_F')
+
+    # print('\nWe make the following substitutions:')
+
+    # # Fluorescence lifetime is inverse of total decay rate of the singlet state
+    # # Quantum yield of the photoreaction is then k_r * fluorescence lifetime
+    # subs=[(1/(ks+kr), tau_F), (kr * tau_F, phi_r)]
+
+    # # perform the steady state approximation for singlet state
+    # # model.steady_state_approx(['^1S'], subs=subs, print_solution=False)
+
+    # rate_constants = [ 1e9, 1e8 ]  # in the order of k_s, k_r
+    # initial_concentrations = [ 2e-5, 0, 0 ] # in the order of GS, ^1S, P
+    # subs = [ 1e8/(1e9+1e8), 1/(1e9 + 1e8) ]  # in the order of tau_F, phi_r
+
+    # # simulate the model, flux is the 'concentration of photons', it is the J parameter
+    # # l is the length of the cuvette = 1 and epsilon = 1e5 is molar abs. coefficient
+    # # as we start with c=2e-5 M, the initial absorbance A = 2
+    # model.simulate_model(rate_constants, initial_concentrations, 
+    #  t_max=600, flux=np.linspace(1e-7, 1e-5, 10), l=1, epsilon=1e5, plot_separately=True, precise_simulation=True)
+
+    
+    # ks, kr = model.symbols['rate_constants']
+    # phi_r, tau_r = symbols('phi_r, tau_r')
+
+    # perform the steady state approximation for singlet state
+    # model.steady_state_approx(['^1S'], subs=[(kr / (ks+kr), phi_r), (ks+kr, 1/tau_r)])
+
+    # text_model = """
+    # A --> B --> C  // k_1 ; k_2
+    # """
+
+    # model = PhotoKineticSymbolicModel.from_text(text_model)
+    # model.print_model()
+    # print(model.symbols['rate_constants'], model.symbols['compartments'])
+    # # model.simulate_model([1, 0.5], [1, 0, 0], t_max=10, plot_separately=False)
+    # # model.pprint_equations()
+    # model.simulate_model([np.linspace(0.5, 1.5, 10), 0.5], [1, 0, 0], t_max=10, flux=1e-6, epsilon=1e5, plot_separately=True)
+
+
 

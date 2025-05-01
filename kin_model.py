@@ -952,8 +952,8 @@ class PhotoKineticSymbolicModel:
         d = {}
 
         def add_entry(key: str, symbol: Symbol, value: float | Iterable[float] = None, 
-                      length: int = 1, unit: str = None, latex_name: str = None, scaled_data: Callable = None):
-            d[key] = dict(symbol=symbol, value=value, length=length, unit=unit, latex_name=latex_name, scaling_function=scaled_data)
+                      length: int = 1, unit: str = None, latex_name: str = None, scale_data: Callable = None):
+            d[key] = dict(symbol=symbol, value=value, length=length, unit=unit, latex_name=latex_name, scale_data=scale_data)
 
         # remove curly braces from the compartment names
         def clean_key(key: str) -> str:
@@ -962,28 +962,31 @@ class PhotoKineticSymbolicModel:
         
         for s in self.symbols['compartments']:  # initial concentrations
             add_entry(clean_key(f"{str(s)[:-3]}_0"), s, unit=f"\\mathrm{{{self.concentration_unit}}}", latex_name=f"[\\mathrm{{{str(s)[2:-3]}}}]_0",
-                      scaled_data=lambda x, coef: x / coef)
+                      scale_data=lambda x, coef: x / coef)
 
         for i, s in enumerate(self.symbols['rate_constants']):
             conc_unit = f'\\mathrm{{{self.concentration_unit}}}^{{{1 - self._rate_constant_orders[i]}}}\\ ' if self._rate_constant_orders[i] > 1 else ''
             add_entry(clean_key(str(s)), s, unit=f'\\mathrm{{{conc_unit}s^{{-1}}}}', latex_name=str(s),
-                      scaled_data=lambda x, coef: x * coef ** (self._rate_constant_orders[i] - 1))
+                      scale_data=lambda x, coef: x * coef ** (self._rate_constant_orders[i] - 1))
 
         for s in self.symbols['epsilons']:
             add_entry(clean_key(f"{str(s)[4:]}"), s, unit=f"\\mathrm{{{self.concentration_unit}}}^{{-1}}\\ \\mathrm{{cm}}^{{-1}}", latex_name=str(s),
-                      scaled_data=lambda x, coef: x * coef)
+                      scale_data=lambda x, coef: x * coef)
 
         for s in self.symbols['substitutions']:
             add_entry(clean_key(str(s)), s, unit='', latex_name=str(s),
-                      scaled_data=lambda x, coef: x)
+                      scale_data=lambda x, coef: x)
 
-        add_entry('l', self.symbols['l'], unit='\\mathrm{cm}', latex_name='l')
+        add_entry('l', self.symbols['l'], unit='\\mathrm{cm}', latex_name='l',
+                  scale_data=lambda x, coef: x)
 
         # self.symbols['other_symbols'] = [sw, J0, FWHM]
-        add_entry('s_w', self.symbols['other_symbols'][0], unit="\\mathrm{s}", latex_name='s_w')
+        add_entry('s_w', self.symbols['other_symbols'][0], unit="\\mathrm{s}", latex_name='s_w',
+                  scale_data=lambda x, coef: x)
         add_entry('J_0', self.symbols['other_symbols'][1], unit=f"\\mathrm{{{self.concentration_unit}}}\\ \\mathrm{{s}}^{{-1}}", latex_name='J_0',
-                  scaled_data=lambda x, coef: x / coef)
-        add_entry('FWHM', self.symbols['other_symbols'][2], unit="\\mathrm{s}", latex_name='FWHM')
+                  scale_data=lambda x, coef: x / coef)
+        add_entry('FWHM', self.symbols['other_symbols'][2], unit="\\mathrm{s}", latex_name='FWHM',
+                  scale_data=lambda x, coef: x)
 
         return d
 
@@ -1268,8 +1271,28 @@ class PhotoKineticSymbolicModel:
         if any((par_matrix < 0).flatten()):
             raise ValueError("All parameters must be positive.")
 
-        get_pars = lambda name: par_matrix[:, par_matrix_index_dict[name]]
+        coef = 1
+        par_matrix_scaled = par_matrix.copy()
+        get_pars = lambda name: par_matrix_scaled[:, par_matrix_index_dict[name]]
         # get_number_of_params = lambda name: len(params[name]) if np.iterable(params[name]) else 1
+
+        init_c = par_matrix[:, :n]   # initial concentrations
+
+        # scale the parameters to have comparable values and to help with integration
+        if rescale:
+            # scaling coefficient, calculate it as geometric mean from non-zero initial concentrations
+            coef = gmean(init_c[init_c > 0])
+            for i, (key, d) in enumerate(params_map.items()):
+                par_matrix_scaled[:, i] = d['scale_data'](par_matrix[:, i], coef)
+
+            init_c /= coef
+
+            # # print(coef)
+            # init_c_sc /= coef
+            # eps_sc *= coef
+            # J0_sc /= coef
+            # # second and higher orders needs to be appropriately scaled, by coef ^ (rate order - 1)
+            # rates_sc *= coef ** (np.asarray(self._rate_constant_orders, dtype=dtype) - 1)
 
         self.last_parameter_matrix = par_matrix
         self.last_parameter_map = params_map
@@ -1277,9 +1300,6 @@ class PhotoKineticSymbolicModel:
         dtype = np.float64
 
         J0s = get_pars('J_0')
-        # n_J0 = get_number_of_params('J_0')
-        # n_square_pulse_width = get_number_of_params('s_w')
-        # n_gaussian_FWHM = get_number_of_params('FWHM')
 
         self.C_tensor = None
         if self.flux_type == 'Gaussian pulse':
@@ -1304,35 +1324,6 @@ class PhotoKineticSymbolicModel:
 
 
         self.times = times
-
-        init_c = par_matrix[:, :n]   # initial concentrations
-
-
-        # TODO rescale all parameters to have comparable values
-
-        # scale rate constants, flux, epsilon and initial_concentrations for less numerial errors in
-        # the numerical integration
-        # coef = 1
-        # init_c_sc = init_c.copy()
-        # rates_sc = rates.copy()
-        # eps_sc = eps.copy()
-        # J0_sc = J0.copy()
-
-        par_matrix_scaled = par_matrix.copy()
-
-        if rescale:
-            # scaling coefficient, calculate it as geometric mean from non-zero initial concentrations
-            coef = gmean(init_c[init_c > 0])  
-
-            # TODO: scale the parameters
-
-            # print(coef)
-            init_c_sc /= coef
-            eps_sc *= coef
-            J0_sc /= coef
-            # second and higher orders needs to be appropriately scaled, by coef ^ (rate order - 1)
-            rates_sc *= coef ** (np.asarray(self._rate_constant_orders, dtype=dtype) - 1)
-        
 
         # differential equations to be simulated
         sym_eqs = list(self.last_SS_solution['diff_eqs'].values()) if use_SS_approx else self.symbols['equations_Fk']
@@ -1409,7 +1400,7 @@ class PhotoKineticSymbolicModel:
         self.A_tensor = l[:, None] * np.sum(eps[:, :, None] * C[:, idxs_abs, :], axis=1)
 
         # scale the traces back to correct values
-        # C *= coef
+        C *= coef
         self.C_tensor = C
 
         # create indexes of only those comps. which will be plotted, so remove all constant comps.
@@ -1493,6 +1484,7 @@ class PhotoKineticSymbolicModel:
 
 if __name__ == '__main__':
 
+
     text_model = """
     GS -hv-> ^1S --> GS  // k_s  # absorption and decay back to ground state
     ^1S --> P            // k_p   # formation of the photoproduct from the singlet state
@@ -1509,15 +1501,17 @@ if __name__ == '__main__':
     # model.pprint_equations()  # print the ODEs
     # model.pprint_equations(True)  # print the ODEs
 
-    model.steady_state_approx(['^1S'])
+    # model.steady_state_approx(['^1S'])
 
     # print(model.get_symbols_for_simulation_map())
 
     params = model.get_par_dict()
     print(params)
 
-    sw = np.linspace(1, 600, 50)
+    sw = np.linspace(10, 100, 10)
     J0 = 1e-4 / sw
+
+    J0 = np.linspace(1e-6, 1e-5, 10)
 
     params.update({
         'c_GS_0': 1e-5,
@@ -1526,20 +1520,20 @@ if __name__ == '__main__':
         'k_s': 1e9,
         'k_p': 1e8,
         'epsilon_GS': 1e5,
-        'epsilon_P': 1e5,
-        's_w': sw,
+        'epsilon_P': 5e4,
+        's_w': 1,
         'J_0': J0,
         'FWHM': 1e-10,
         'l': 1,
     })
 
-    model.simulate_model(params, t_max=1e3,  ODE_solver="Radau", t_points=1e3)
+    model.simulate_model(params, t_max=1e3,  ODE_solver="Radau", t_points=1e3, rescale=False)
 
     # print(model.last_parameter_map)
 
-    # model.plot_simulation_results(plot_separately=True)
+    model.plot_simulation_results(plot_separately=True)
 
-    model.plot_depenency('s_w', 'P', data_type="last", plot_type="scatter")
+    # model.plot_depenency('s_w', 'P', data_type="last", plot_type="scatter")
 
     # model.steady_state_approx(['^1S'])
 

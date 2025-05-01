@@ -1007,11 +1007,11 @@ class PhotoKineticSymbolicModel:
                           yscale: str = 'linear',   figsize: tuple = (6, 3), 
                           cmap: str = 'plasma', lw: float = 2, 
                           legend_fontsize: int = 10, legend_labelspacing: float = 0,
-                          legend_loc: str = 'best', legend_bbox_to_anchor: tuple = None,
+                          legend_loc: str = 'center right', legend_bbox_to_anchor: tuple = (1.5, 0.5),
                           stack_plots_in_rows: bool = True, filepath: str = None, 
                           dpi: int = 300, transparent: bool = False,
                           auto_convert_time_units: bool = True,
-                          sig_figures: int = 3):
+                          sig_figures: int = 3, include_absorbance: bool = True):
         """
         Plots the results of the simulation. The function creates either separate plots for each compartment
         or combines all compartments into a single plot, depending on the plot_separately parameter.
@@ -1056,6 +1056,8 @@ class PhotoKineticSymbolicModel:
             Time unit will be denoted on x axis.
         sig_figures : int
             Number of significant figures to display in the legend. Default 3.
+        include_absorbance : bool
+            If True (default), the absorbance will be plotted for plot_separately = True only.
         """
 
         k = self.last_parameter_matrix.shape[0]
@@ -1078,7 +1080,7 @@ class PhotoKineticSymbolicModel:
                     continue
                 entry.append(f"{d['latex_name']}={format_number_latex(d['value'][i], sig_figures)}\\ {d['unit']}")
 
-            par_names.append(', '.join(entry))
+            par_names.append(',\\ '.join(entry))
 
         times_scaled = self.times.copy()
         if auto_convert_time_units:
@@ -1089,7 +1091,7 @@ class PhotoKineticSymbolicModel:
 
         # Prepare data for plotting
         num_J = 1 if self.flux_type != 'Continuous' else 0
-        num_A = 1 if n_abs > 0 else 0
+        num_A = 1 if n_abs > 0 and include_absorbance else 0
 
         def setup_axis(ax, yscale):
             ax.set_yscale(yscale)
@@ -1100,7 +1102,7 @@ class PhotoKineticSymbolicModel:
 
         if plot_separately:
             n_rows = len(self.compartments_to_plot) + num_J + num_A
-            figsize = (figsize[0], figsize[1] * n_rows)
+            figsize = (figsize[0], figsize[1] * n_rows) if stack_plots_in_rows else (figsize[0] * n_rows, figsize[1])
             fig, axes = plt.subplots(n_rows if stack_plots_in_rows else 1, 1 if stack_plots_in_rows else n_rows, figsize=figsize, sharex=True)
 
             cmap = cm.get_cmap(cmap)
@@ -1109,6 +1111,7 @@ class PhotoKineticSymbolicModel:
                 for j in range(k):
                     ax.plot(times_scaled, self.J(self.times, j), label='', lw=lw, color=cmap(j / k))
                 ax.set_title('$J(t)$')
+                ax.set_ylabel('$J(t)$')
                 setup_axis(ax, yscale)
 
             if num_A:
@@ -1116,19 +1119,30 @@ class PhotoKineticSymbolicModel:
                 for j in range(k):
                     ax.plot(times_scaled, self.A_tensor[j], label='', lw=lw, color=cmap(j / k))
                 ax.set_title('Total absorbance')
+                ax.set_ylabel('Absorbance')
                 setup_axis(ax, yscale)
+
+            plots = []
 
             for i, (comp, trace, ax) in enumerate(zip(comps_cast, traces_cast, axes[num_J + num_A:])):
+                plots = []
                 for j in range(k):
                     label = '' if par_names[j] == '' else f'${par_names[j]}$'
-                    ax.plot(times_scaled, trace[j], label=label if i == 0 else '', lw=lw, color=cmap(j / k))
+                    line, = ax.plot(times_scaled, trace[j], label=label, lw=lw, color=cmap(j / k))
+                    plots.append(line)
                 ax.set_ylabel(f'c / {self.concentration_unit}')
-                if i == (0 if stack_plots_in_rows else n_rows - 1) and k > 1:
-                    ax.legend(frameon=False, fontsize=legend_fontsize, labelspacing=legend_labelspacing, loc=legend_loc, bbox_to_anchor=legend_bbox_to_anchor)
+                # if i == (0 if stack_plots_in_rows else n_rows - 1) and k > 1:
+                #     ax.legend(frameon=False, fontsize=legend_fontsize, labelspacing=legend_labelspacing, loc=legend_loc, bbox_to_anchor=legend_bbox_to_anchor)
                 ax.set_title(f'$\\mathrm{{{comp}}}$')
                 setup_axis(ax, yscale)
-
-            axes[-1].set_xlabel(f'Time / ${t_unit}$')
+            if k > 1:
+                fig.legend(handles=plots, bbox_to_anchor=legend_bbox_to_anchor, 
+                           fontsize=legend_fontsize, labelspacing=legend_labelspacing, loc=legend_loc)
+            if stack_plots_in_rows:
+                axes[-1].set_xlabel(f'Time / ${t_unit}$')
+            else:
+                for ax in axes:
+                    ax.set_xlabel(f'Time / ${t_unit}$')
 
         else:
             figsize = (figsize[0], figsize[1] * k)

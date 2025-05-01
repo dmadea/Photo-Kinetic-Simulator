@@ -249,7 +249,7 @@ def format_time_latex(number: float, sig_figures: int = 3):
 
 def ode_integrate(func: Callable, y0: np.ndarray | float, times: np.ndarray, method: str = 'Radau', 
                 args: tuple | None = None, pulse_max_step: float = np.inf, pulse_duration: float | None = None,
-                atol: float = 1e-6, rtol: float = 1e-3):
+                atol: float = 1e-6, rtol: float = 1e-3, default_max_step: float = np.inf):
     """
     Integrates the ODE system using the specified method.
 
@@ -274,11 +274,14 @@ def ode_integrate(func: Callable, y0: np.ndarray | float, times: np.ndarray, met
         The absolute tolerance for the integration.
     rtol : float | None
         The relative tolerance for the integration.
+    default_max_step : float
+        The default maximum step size for the integration. Used when the pulse duration is not specified 
+        and the integration is done over the entire time range.
     """
 
     if pulse_duration is None:
         sol = solve_ivp(func, (times[0], times[-1]), y0, method=method, vectorized=False, dense_output=False,
-            t_eval=times, max_step=np.inf, args=args, atol=atol, rtol=rtol)
+            t_eval=times, max_step=default_max_step, args=args, atol=atol, rtol=rtol)
 
         return sol.y
 
@@ -292,7 +295,7 @@ def ode_integrate(func: Callable, y0: np.ndarray | float, times: np.ndarray, met
             t_eval=times_pulse, max_step=pulse_max_step, args=args, atol=atol, rtol=rtol)
 
         sol_rest = solve_ivp(func, (times_rest[0], times[-1]), sol_pulse.y[:, -1], method=method, vectorized=False, dense_output=False,
-            t_eval=times_rest, max_step=np.inf, args=args, atol=atol, rtol=rtol, first_step=pulse_max_step)
+            t_eval=times_rest, max_step=default_max_step, args=args, atol=atol, rtol=rtol, first_step=pulse_max_step)
 
         return np.hstack((sol_pulse.y[:, :-1], sol_rest.y))
 
@@ -411,6 +414,10 @@ class PhotoKineticSymbolicModel:
         self.A_tensor = None  # absorbance tensor
         self.concentration_unit = concentration_unit
         self.last_parameter_matrix: np.ndarray | None = None
+
+        self.J: Callable | None = None  # flux function, takes time and index as arguments
+        self.compartments_to_plot: list[str] = []  # compartments to plot
+        self.last_parameter_map: dict[str, dict] = {}  # contains the last symbols map
 
 
     def create_flux_equations(self):
@@ -937,46 +944,222 @@ class PhotoKineticSymbolicModel:
 
         self.create_flux_equations()
 
-    def get_symbols_for_simulation_map(self) -> dict[str, Symbol]:
+    def get_parameter_map(self) -> dict[str, Symbol]:
         """
+        Returns a dictionary of parameters for the model. The keys are the parameter names, and the values are dictionaries
+        containing the parameter symbol, value, length, unit, latex name, and scaling function.
+        """
+        d = {}
 
-         self.symbols = dict(compartments=[],
-            equations=[],  # contains diff equations in full form
-            equations_Fk=[], # contains diff equations with symbol Fk instead of (1 - 10 ** -A) / A
-            rate_constants=[],
-            time=None,  # t
-            flux=None,    # J(t)
-            Fk=None,  # Photokinetic factor
-            explicit_Fk=None,  # explicit full Fk = (1 - 10 ** -A) / A
-            l=None,
-            epsilons=[],
-            substitutions=[])  # contains the symbols used for substitutions
+        def add_entry(key: str, symbol: Symbol, value: float | Iterable[float] = None, 
+                      length: int = 1, unit: str = None, latex_name: str = None, scaled_data: Callable = None):
+            d[key] = dict(symbol=symbol, value=value, length=length, unit=unit, latex_name=latex_name, scaling_function=scaled_data)
 
-            last n names in dictionary are initial concentrations
+        # remove curly braces from the compartment names
+        def clean_key(key: str) -> str:
+            """Remove curly braces and backslashes from the key."""
+            return key.replace('{', '').replace('}', '').replace('\\', '')
         
-        """
+        for s in self.symbols['compartments']:  # initial concentrations
+            add_entry(clean_key(f"{str(s)[:-3]}_0"), s, unit=f"\\mathrm{{{self.concentration_unit}}}", latex_name=f"[\\mathrm{{{str(s)[2:-3]}}}]_0",
+                      scaled_data=lambda x, coef: x / coef)
 
-        d = dict(l=self.symbols['l'])
+        for i, s in enumerate(self.symbols['rate_constants']):
+            conc_unit = f'\\mathrm{{{self.concentration_unit}}}^{{{1 - self._rate_constant_orders[i]}}}\\ ' if self._rate_constant_orders[i] > 1 else ''
+            add_entry(clean_key(str(s)), s, unit=f'\\mathrm{{{conc_unit}s^{{-1}}}}', latex_name=str(s),
+                      scaled_data=lambda x, coef: x * coef ** (self._rate_constant_orders[i] - 1))
 
-        d.update({f"{str(s)[4:]}": s for s in self.symbols['epsilons']})
-        d.update({str(s): s for s in self.symbols['rate_constants']})
-        d.update({str(s): s for s in self.symbols['substitutions']})
-        d.update({str(s): s for s in self.symbols['other_symbols']})
-        d.update({f"{str(s)[:-3]}_0": s for s in self.symbols['compartments']})
+        for s in self.symbols['epsilons']:
+            add_entry(clean_key(f"{str(s)[4:]}"), s, unit=f"\\mathrm{{{self.concentration_unit}}}^{{-1}}\\ \\mathrm{{cm}}^{{-1}}", latex_name=str(s),
+                      scaled_data=lambda x, coef: x * coef)
+
+        for s in self.symbols['substitutions']:
+            add_entry(clean_key(str(s)), s, unit='', latex_name=str(s),
+                      scaled_data=lambda x, coef: x)
+
+        add_entry('l', self.symbols['l'], unit='\\mathrm{cm}', latex_name='l')
+
+        # self.symbols['other_symbols'] = [sw, J0, FWHM]
+        add_entry('s_w', self.symbols['other_symbols'][0], unit="\\mathrm{s}", latex_name='s_w')
+        add_entry('J_0', self.symbols['other_symbols'][1], unit=f"\\mathrm{{{self.concentration_unit}}}\\ \\mathrm{{s}}^{{-1}}", latex_name='J_0',
+                  scaled_data=lambda x, coef: x / coef)
+        add_entry('FWHM', self.symbols['other_symbols'][2], unit="\\mathrm{s}", latex_name='FWHM')
 
         return d
 
+    def get_par_dict(self) -> dict[str, float | None]:
+        """
+        Returns a dictionary of parameters for the model.
+        """
+
+        params = {key: None for key in self.get_parameter_map().keys()}
+        params['l'] = 1
+        params['J_0'] = 1e-5
+        params['FWHM'] = 1
+        params['s_w'] = 1
+
+        return params
+
+    def plot_simulation_results(self,  plot_separately: bool = True, t_unit: str = 's', 
+                          yscale: str = 'linear',   figsize: tuple = (6, 3), 
+                          cmap: str = 'plasma', lw: float = 2, 
+                          legend_fontsize: int = 10, legend_labelspacing: float = 0,
+                          legend_loc: str = 'best', legend_bbox_to_anchor: tuple = None,
+                          stack_plots_in_rows: bool = True, filepath: str = None, 
+                          dpi: int = 300, transparent: bool = False,
+                          auto_convert_time_units: bool = True,
+                          sig_figures: int = 3):
+        """
+        Plots the results of the simulation. The function creates either separate plots for each compartment
+        or combines all compartments into a single plot, depending on the plot_separately parameter.
+
+        Parameters
+        ----------
+        t_unit : str
+            Time unit to display on the x-axis. Default 's'.
+        yscale : str
+            Scale of the y axis. Default 'linear'. Can be 'log', etc.
+        plot_separately: 
+            If True (default True), the plot will have n graphs in which n is number of compartments to plot. In each graph,
+            the one compartment will be plotted. If there are some iterables (length k) in the input parameters, each graph
+            will have k curves.
+            If True, rate constant, initial concentrations and epsilon and flux will be scaled by suitable factor
+            (determined by the geometric mean of the initial concentrations). This can help to reduce numerical errors
+            in the integrator. Optional. Default True.
+        figsize : tuple
+            Figure size of one graph. Default (6, 3): (width, height).
+        cmap : str
+            Color map used to color the individual curves if plot_separately = True. Default 'plasma'.
+        lw : float
+            Line width of the curves. Default 2.
+        legend_fontsize : int
+            Fontsize of the legend. Default 10.
+        legend_labelspacing : float
+            Vertical spacing of the labels in legend. Default 0. Can be negative.
+        legend_loc : str
+            Location of the legend. Default 'best'.
+        legend_bbox_to_anchor : tuple
+            Box to position the legend. Default None.
+        stack_plots_in_rows : bool
+            If True (default), stacks plots vertically. If False, arranges them horizontally.
+        filepath : str
+            If specified, saves the plot to this location. Default None.
+        dpi : int
+            DPI of the resulting plot that will be saved to file. Default 300.
+        transparent : bool
+            If True, the saved image will be transparent. Default False.
+        auto_convert_time_units : bool
+            If True (default), time will be converted to corresponding smaller or bigger units.
+            Time unit will be denoted on x axis.
+        sig_figures : int
+            Number of significant figures to display in the legend. Default 3.
+        """
+
+        k = self.last_parameter_matrix.shape[0]
+
+        comps = self.get_compartments()
+        idxs2plot = [comps.index(comp) for comp in self.compartments_to_plot]
+
+        comps_cast = self.compartments_to_plot
+        traces_cast = [self.C_tensor[:, i, :] for i in idxs2plot]
+
+        params_map = self.last_parameter_map
+
+        par_names = []
+
+        for i in range(k):
+            entry = []
+
+            for key, d in params_map.items():
+                if d['length'] == 1:
+                    continue
+                entry.append(f"{d['latex_name']}={format_number_latex(d['value'][i], sig_figures)}\\ {d['unit']}")
+
+            par_names.append(', '.join(entry))
+
+        times_scaled = self.times.copy()
+        if auto_convert_time_units:
+            s_factor, t_unit = get_time_unit(self.times[-1])
+            times_scaled *= s_factor
+
+        n_abs = len(self.absorbing_compartments)
+
+        # Prepare data for plotting
+        num_J = 1 if self.flux_type != 'Continuous' else 0
+        num_A = 1 if n_abs > 0 else 0
+
+        def setup_axis(ax, yscale):
+            ax.set_yscale(yscale)
+            ax.tick_params(axis='both', which='major', direction='in')
+            ax.tick_params(axis='both', which='minor', direction='in')
+            ax.xaxis.set_ticks_position('both')
+            ax.yaxis.set_ticks_position('both')
+
+        if plot_separately:
+            n_rows = len(self.compartments_to_plot) + num_J + num_A
+            figsize = (figsize[0], figsize[1] * n_rows)
+            fig, axes = plt.subplots(n_rows if stack_plots_in_rows else 1, 1 if stack_plots_in_rows else n_rows, figsize=figsize, sharex=True)
+
+            cmap = cm.get_cmap(cmap)
+            if num_J:
+                ax = axes[0]
+                for j in range(k):
+                    ax.plot(times_scaled, self.J(self.times, j), label='', lw=lw, color=cmap(j / k))
+                ax.set_title('$J(t)$')
+                setup_axis(ax, yscale)
+
+            if num_A:
+                ax = axes[num_J]
+                for j in range(k):
+                    ax.plot(times_scaled, self.A_tensor[j], label='', lw=lw, color=cmap(j / k))
+                ax.set_title('Total absorbance')
+                setup_axis(ax, yscale)
+
+            for i, (comp, trace, ax) in enumerate(zip(comps_cast, traces_cast, axes[num_J + num_A:])):
+                for j in range(k):
+                    label = '' if par_names[j] == '' else f'${par_names[j]}$'
+                    ax.plot(times_scaled, trace[j], label=label if i == 0 else '', lw=lw, color=cmap(j / k))
+                ax.set_ylabel(f'c / {self.concentration_unit}')
+                if i == (0 if stack_plots_in_rows else n_rows - 1) and k > 1:
+                    ax.legend(frameon=False, fontsize=legend_fontsize, labelspacing=legend_labelspacing, loc=legend_loc, bbox_to_anchor=legend_bbox_to_anchor)
+                ax.set_title(f'$\\mathrm{{{comp}}}$')
+                setup_axis(ax, yscale)
+
+            axes[-1].set_xlabel(f'Time / ${t_unit}$')
+
+        else:
+            figsize = (figsize[0], figsize[1] * k)
+            fig, axes = plt.subplots(k if stack_plots_in_rows else 1, 1 if stack_plots_in_rows else k, figsize=figsize, sharex=True)
+
+            for i in range(k):
+                ax = axes[i] if k > 1 else axes
+
+                for j, (comp, trace) in enumerate(zip(comps_cast, traces_cast)):
+                    color = COLORS[j % len(COLORS)]
+                    ax.plot(times_scaled, trace[i], label=f'$\\mathrm{{{comp}}}$', lw=lw, color=color)
+
+                if i == k - 1:
+                    ax.set_xlabel(f'Time / ${t_unit}$')
+                ax.set_ylabel(f'c / {self.concentration_unit}')
+                title = '' if par_names[i] == '' else f'${par_names[i]}$'
+                ax.set_title(title)
+                ax.set_yscale(yscale)
+                ax.tick_params(axis='both', which='major', direction='in')
+                ax.tick_params(axis='both', which='minor', direction='in')
+                ax.xaxis.set_ticks_position('both')
+                ax.yaxis.set_ticks_position('both')
+                ax.legend(frameon=False, fontsize=legend_fontsize, labelspacing=legend_labelspacing, loc=legend_loc, bbox_to_anchor=legend_bbox_to_anchor)
+            
+        plt.tight_layout()
+        if filepath:
+            plt.savefig(filepath, dpi=dpi, transparent=transparent)
+        plt.show()
 
     def simulate_model(self, parameters: dict[str, Union[float, Iterable]],
                        constant_compartments: Union[None, List[str], Tuple[str]] = None,
                        t_max: Union[float, int] = 1e3, t_points: int = 1000, 
-                        use_SS_approx: bool = True, ODE_solver: str = 'Radau', 
-                       plot_separately: bool = True,  figsize: Union[tuple, list] = (6, 3), yscale: str = 'linear',
-                       cmap: str = 'plasma', lw: float = 2, legend_fontsize: int = 10, legend_labelspacing: float = 0,
-                       legend_loc: str = 'best', legend_bbox_to_anchor: Union[tuple, None] = None, 
-                       stack_plots_in_rows: bool = True, filepath: Union[None, str] = None, dpi: int = 300, 
-                       transparent: bool = False, plot_results: bool = True, rescale: bool = True,
-                       auto_convert_time_units: bool = True, sig_figures: int = 3):
+                       use_SS_approx: bool = True, ODE_solver: str = 'Radau', 
+                       rescale: bool = True, default_max_step: float = np.inf):
         """
         Simulates the current model and plots the results if ``plot_results`` is True (default True). Parameters
         rate_constant and initial_concentrations can contain iterables. In this case, the model will be simulated
@@ -1005,46 +1188,15 @@ class PhotoKineticSymbolicModel:
             Name of the ODE solver used to numerically simulate the model. Default 'Radau'. Available options are:
             'RK45', 'RK23', 'DOP853', 'Radau', 'BDF', 'LSODA'. For details, see
             https://docs.scipy.org/doc/scipy/reference/generated/scipy.integrate.solve_ivp.html#scipy.integrate.solve_ivp
-
-        plot_separately: 
-            If True (default True), the plot will have n graphs in which n is number of compartments to plot. In each graph,
-            the one compartment will be plotted. If there are some iterables (length k) in the input parameters, each graph
-            will have k curves.
-        figsize: tuple 
-            Figure size of one graph. Optional. Default (6, 3): (width, height).
-        yscale: 
-            Scale of the y axis. Optional. Default 'linear'. Could be 'log', etc.
-        cmap: 
-            Color map used to color the individual curves if plot_separately = True.
-        lw: 
-            Line width of the curves. Optional. Default 2.
-        legend_fontsize: 
-            Fontsize of the legend. Optional. Default 10.
-        legend_labelspacing: 
-            Vertical spacing of the labels in legend. Optional. Default 0. Can be negative.
-        legend_loc:
-            Location of the legend. Default 'best'.
-        legend_bbox_to_anchor:
-            Box to position the legend. Default None.
-        stack_plots_in_rows:
-            Default True.
-        filepath: 
-            If specified (default None), the plot will be saved into this location with a specified filename.
-        dpi: 
-            DPI of the resulting plot that will be saved to file. Optional. Default 300.
-        transparent: 
-            If True, the saved image will be transparent. Optional. Default False.
-        plot_results: 
-            If True, the result will be plotted. Optional. Default True.
-        rescale: 
-            If True, rate constant, initial concentrations and epsilon and flux will be scaled by suitable factor
-            (determined by the geometric mean of the initial concentrations). This can help to reduce numerical errors
-            in the integrator. Optional. Default True.
-        auto_convert_time_units:
-            If True, time will be converted to corresponding smaller or bigger units. Time unit will be denoted on x axis.
         sig_figures : 
             Number of significant figures the rate constants, initial concentrations and/or substitutions will be rounded to 
             if displayed in the plot.
+        default_max_step:
+            The default maximum step size for the ODE solver. Used when the pulse duration is not specified 
+            and the integration is done over the entire time range.
+        rescale:
+            If True (default True), the parameters will be rescaled to have comparable values. This can help to reduce numerical errors
+            in the integrator.
         """
         
         if len(self.symbols['equations']) == 0:
@@ -1053,77 +1205,81 @@ class PhotoKineticSymbolicModel:
         comps = self.get_compartments()
         n = len(comps)
 
-        sim_map = self.get_symbols_for_simulation_map()
+        params_map = self.get_parameter_map()
+        inv_params_map = {v['symbol']: k for k, v in params_map.items()}
 
         # symbols for lamdify functions
-        symbols_lamdify_dict = sim_map.copy()
+        # remove the symbols that are not needed for the lamdify functions
+        # initial concentrations became the real concentrations and are storred at the beginning of the dictionary
+        # remove l, J_0, FWHM, s_w
+        init_conc_names = [key for key in list(params_map.keys())[:n]]
+        init_conc_symbols = [params_map[key]['symbol'] for key in init_conc_names]
+
+        symbols_lamdify_dict = params_map.copy()
+        # remove first n entries to remove initial concentrations
+        symbols_lamdify_dict = {key: symbols_lamdify_dict[key] for key in list(symbols_lamdify_dict.keys())[n:]}
         del symbols_lamdify_dict['l']
         del symbols_lamdify_dict['J_0']
         del symbols_lamdify_dict['FWHM']
         del symbols_lamdify_dict['s_w']
 
-        sim_key_list = list(sim_map.keys())
+        # create an index map that will map from par_matrix to symbols_lamdify
+        sim_key_list = list(params_map.keys())
         sym_map_idxs = list(map(sim_key_list.index, list(symbols_lamdify_dict.keys())))
 
-        symbols_lamdify_dict[str(self.symbols['flux'])] = self.symbols['flux']
-        symbols_lamdify_dict[str(self.symbols['Fk'])] = self.symbols['Fk']
+        # symbols_lamdify_dict[str(self.symbols['flux'])] = self.symbols['flux']
+        # symbols_lamdify_dict[str(self.symbols['Fk'])] = self.symbols['Fk']
 
-        symbols_lamdify = list(symbols_lamdify_dict.values())
-
-        init_conc_names = [key for key in list(sim_map.keys())[-n:]]
+        symbols_lamdify = init_conc_symbols + list(map(lambda entry: entry['symbol'], symbols_lamdify_dict.values())) + [self.symbols['flux'], self.symbols['Fk']]
 
         n_abs = len(self.symbols['epsilons'])
         use_SS_approx = use_SS_approx and len(self.last_SS_solution['SS_eqs'].values()) > 0
 
-        params = {key: None for key in sim_map.keys()}
-        params['l'] = 1
-        params['J_0'] = 1e-5
-        params['FWHM'] = 1
-        params['s_w'] = 1
+        params = self.get_par_dict()
 
         for key, value in parameters.items():
             if key in params.keys():
                 params[key] = value
 
         not_specified = []
-        for key, value in parameters.items():
+        for key, value in params.items():
             if value is None:
                 not_specified.append(key)
 
         assert len(not_specified) == 0, f"Parameters {not_specified} must be specified."
     
-        assert params['s_w'] > 0, "Square pulse width must be positive."
-        assert params['FWHM'] > 0, "Gaussian FWHM must be positive."
-        assert params['J_0'] > 0, "Incident photon flux must be positive."
-        assert params['l'] > 0, "Path length must be positive."
-
         # find the maximal length of params which are iterable
-        k = max([len(v) for v in params.values() if np.iterable(v)])
-        par_matrix = np.zeros((len(params), k))
+        k = max(list(map(lambda v: len(v) if np.iterable(v) else 1, params.values())))
+        par_matrix = np.zeros((k, len(params)))
 
         par_matrix_index_dict = {key: i for i, key in enumerate(params.keys())}
-        inv_par_matrix_index_dict = {i: key for i, key in enumerate(params.keys())}
+        # inv_par_matrix_index_dict = {i: key for i, key in enumerate(params.keys())}
 
         for i, (key, value) in enumerate(params.items()):
             if np.iterable(value):
                 assert len(value) == k, f"Length of {key} must match the length of all iterables."
-            par_matrix[i, :] = value
+                par_matrix[:, i] = np.asarray(value)
+                params_map[key]['length'] = len(value)
+            else:
+                par_matrix[:, i] = value
+                params_map[key]['length'] = 1
+            params_map[key]['value'] = value
 
+        if any((par_matrix < 0).flatten()):
+            raise ValueError("All parameters must be positive.")
 
-        get_pars = lambda name: par_matrix[par_matrix_index_dict[name], :]
-        get_number_of_params = lambda name: len(params[name]) if np.iterable(params[name]) else 1
-
-        # create an index map that will map from par_matrix to symbols_lamdify
-
+        get_pars = lambda name: par_matrix[:, par_matrix_index_dict[name]]
+        # get_number_of_params = lambda name: len(params[name]) if np.iterable(params[name]) else 1
 
         self.last_parameter_matrix = par_matrix
+        self.last_parameter_map = params_map
 
         dtype = np.float64
 
         J0s = get_pars('J_0')
-        n_J0 = get_number_of_params('J_0')
-        n_square_pulse_width = get_number_of_params('s_w')
-        n_gaussian_FWHM = get_number_of_params('FWHM')
+        # n_J0 = get_number_of_params('J_0')
+        # n_square_pulse_width = get_number_of_params('s_w')
+        # n_gaussian_FWHM = get_number_of_params('FWHM')
 
         self.C_tensor = None
         if self.flux_type == 'Gaussian pulse':
@@ -1132,25 +1288,27 @@ class PhotoKineticSymbolicModel:
             times = np.linspace(-fwhms.max() * 3, t_max, int(t_points), dtype=dtype)
             pulse_duration = min(6 * fwhms.max(), t_max)  # for ivp solver
             max_step = min(fwhms.min() / 20, t_max / 10)
-            J = lambda t, i: gaussian(t, fwhms[i], J0s[i])
+            self.J = lambda t, i: gaussian(t, fwhms[i], J0s[i])
         elif self.flux_type == 'Square pulse':
             assert n_abs > 0, "Square pulse is not allowed for the model without absorbing compartments."
             times = np.linspace(0, t_max, int(t_points), dtype=dtype)
             pulse_duration = None
             max_step = np.inf
             sw = get_pars('s_w')
-            J = lambda t, i: square(t, sw[i], J0s[i])
+            self.J = lambda t, i: square(t, sw[i], J0s[i])
         else:
             times = np.linspace(0, t_max, int(t_points), dtype=dtype)
             pulse_duration = None
             max_step = np.inf
-            J = lambda t, i=None: J0s[i] * np.ones_like(t) if isinstance(t, np.ndarray) else J0s[i]
+            self.J = lambda t, i=None: J0s[i] * np.ones_like(t) if isinstance(t, np.ndarray) else J0s[i]
 
 
         self.times = times
 
-        init_c = par_matrix[-n:, :]   # initial concentrations
-        par_matrix_cropped = par_matrix[:-n, :]  # rate constants, flux, epsilon and substitutions
+        init_c = par_matrix[:, :n]   # initial concentrations
+
+
+        # TODO rescale all parameters to have comparable values
 
         # scale rate constants, flux, epsilon and initial_concentrations for less numerial errors in
         # the numerical integration
@@ -1160,20 +1318,21 @@ class PhotoKineticSymbolicModel:
         # eps_sc = eps.copy()
         # J0_sc = J0.copy()
 
-        # if rescale:
-        #     # scaling coefficient, calculate it as geometric mean from non-zero initial concentrations
-        #     coef = gmean(init_c[init_c > 0])  
-        #     # print(coef)
-        #     init_c_sc /= coef
-        #     eps_sc *= coef
-        #     J0_sc /= coef
-        #     # second and higher orders needs to be appropriately scaled, by coef ^ (rate order - 1)
-        #     rates_sc *= coef ** (np.asarray(self._rate_constant_orders, dtype=dtype) - 1)
-        
+        par_matrix_scaled = par_matrix.copy()
 
+        if rescale:
+            # scaling coefficient, calculate it as geometric mean from non-zero initial concentrations
+            coef = gmean(init_c[init_c > 0])  
+
+            # TODO: scale the parameters
+
+            # print(coef)
+            init_c_sc /= coef
+            eps_sc *= coef
+            J0_sc /= coef
+            # second and higher orders needs to be appropriately scaled, by coef ^ (rate order - 1)
+            rates_sc *= coef ** (np.asarray(self._rate_constant_orders, dtype=dtype) - 1)
         
-        # symbols = self.symbols['rate_constants'] + self.symbols['compartments'] + self.symbols['substitutions'] + \
-        #           self.symbols['epsilons'] + [self.symbols['flux'], self.symbols['Fk']]
 
         # differential equations to be simulated
         sym_eqs = list(self.last_SS_solution['diff_eqs'].values()) if use_SS_approx else self.symbols['equations_Fk']
@@ -1191,29 +1350,32 @@ class PhotoKineticSymbolicModel:
         # the same order as in epsilons
         idxs_abs = list(self.absorbing_compartments.values())
 
+        # create a mapping of epsilon values from par_matrix
+        eps_params_names = [inv_params_map[sym] for sym in self.symbols['epsilons']]
+        eps_params_idxs = [par_matrix_index_dict[name] for name in eps_params_names]
+
         d_funcs = list(map(lambda eq: lambdify(symbols_lamdify, eq.rhs, 'numpy'), sym_eqs))
+
+        l = get_pars('l')
+        eps = par_matrix_scaled[:, eps_params_idxs]
 
         def dc_dt(t, c, i):  # index
             # only compartments in idxs2simulate are being simulated
             _c = np.zeros(n)  # need to cast the concentations to have the original size of the compartments
             _c[idxs2simulate] = c
  
-            _epsilons = eps_sc[i, :]
+            _eps = eps[i, :]
 
             # if we have absorbing compartments, we need to calculate the photokinetic factor
             # Approximate Fk, ignores the concentrations of steady state-compartments, c of them is set to 0 
             Fk = 0
             _J = 0
             if n_abs > 0:
-                A_prime = np.sum(_epsilons * _c[idxs_abs])
-                Fk = photokin_factor(A_prime, l)
-                _J = J(t, i)
+                A_prime = np.sum(_eps * _c[idxs_abs])
+                Fk = photokin_factor(A_prime, l[i])
+                _J = self.J(t, i)
 
-            solution = np.asarray([f(*par_matrix[i, sym_map_idxs], _J, Fk) for f in d_funcs])
-            # solution = np.asarray([f(*rates_sc[i, :], *_c, *subs[i, :], *_epsilons, _J, Fk) for f in d_funcs])
-
-            # solution = np.asarray([f(*rates, *_c, *subs, *epsilons, J(t, J0), l) for f in d_funcs])
-
+            solution = np.asarray([f(*_c, *par_matrix_scaled[i, sym_map_idxs], _J, Fk) for f in d_funcs])
             solution[idxs_constant_cast] = 0  # set the change of constant compartments to zero
 
             return solution
@@ -1226,8 +1388,8 @@ class PhotoKineticSymbolicModel:
         for i in range(k):
             # numerically integrate
 
-            C[i, idxs2simulate, :] = ode_integrate(dc_dt, init_c_sc[i, idxs2simulate], times, method=ODE_solver, rtol=1e-6, atol=1e-9,
-                    pulse_max_step=max_step, pulse_duration=pulse_duration, args=(i,))
+            C[i, idxs2simulate, :] = ode_integrate(dc_dt, init_c[i, idxs2simulate], times, method=ODE_solver, rtol=1e-6, atol=1e-9,
+                    pulse_max_step=max_step, pulse_duration=pulse_duration, args=(i,), default_max_step=default_max_step)
 
             # calculate the SS concentrations from the solution of diff. eq.
             if use_SS_approx:
@@ -1236,153 +1398,64 @@ class PhotoKineticSymbolicModel:
                 Fk = 0
                 _J = 0
                 if n_abs > 0:
-                    A_prime = np.sum(eps_sc[i, :, None] * C[i, idxs_abs, :], axis=0)
-                    Fk = photokin_factor(A_prime, l)
-                    _J = J(times, J0_sc[i], i)
+                    A_prime = np.sum(eps[i, :, None] * C[i, idxs_abs, :], axis=0)
+                    Fk = photokin_factor(A_prime, l[i])
+                    _J = self.J(times, i)
 
                 for j, f in f_SS:
-                    C[i, j, :] = f(*rates_sc[i, :], *list(C[i]), *subs[i, :], *eps_sc[i, :], _J, Fk)
+                    C[i, j, :] = f(*list(C[i]), *par_matrix_scaled[i, sym_map_idxs], _J, Fk)
 
         # calculate the absorbance
-        self.A_tensor = l * np.sum(eps_sc[:, :, None] * C[:, idxs_abs, :], axis=1)
+        self.A_tensor = l[:, None] * np.sum(eps[:, :, None] * C[:, idxs_abs, :], axis=1)
 
         # scale the traces back to correct values
-        C *= coef
+        # C *= coef
         self.C_tensor = C
 
         # create indexes of only those comps. which will be plotted, so remove all constant comps.
         idxs2plot = set(np.arange(n, dtype=int)) - set(np.asarray(idxs2simulate)[idxs_constant_cast])
+        self.compartments_to_plot = [comps[i] for i in idxs2plot]
 
-        comps_cast = [comps[i] for i in idxs2plot]
-        traces_cast = [self.C_tensor[:, i, :] for i in idxs2plot]
+    def plot_depenency(self, parameter_name: str, compartment_name: str, 
+                      data_type: str = "last", yscale: str = "linear", plot_type: str = "scatter", figsize: tuple = (5, 4)):
+        """
+        Plots the dependency of the parameter on the compartment concentration at the beggining, last points or the integral of the compartment concentration over time.
 
-        def format_rate_constant(i, j):
-            conc_unit = f'\\ {self.concentration_unit}^{{{1 - self._rate_constant_orders[j]}}}' if self._rate_constant_orders[j] > 1 else ''
-            return f"{self.symbols['rate_constants'][j]}={format_number_latex(rates[i, j], sig_figures)}{conc_unit}\\ s^{{-1}}"
+        Parameters
+        ----------
+        parameter_name: str
+            The name of the parameter to plot the dependency on.
+        compartment_name: str
+            The name of the compartment to plot the dependency on.
+        data_type: str
+            The type of data to plot. Can be "last", "integral" or "first".
+        yscale: str
+            The scale of the y-axis. Can be "linear" or "log".
+        plot_type: str
+            The type of plot to use. Can be "scatter" or "line".
+        figsize: tuple
+            The size of the figure. Default (6, 4).
+        """
 
-        # find what rate constants or initial concentrations are changing
-        par_names = []
-        for i in range(k):
-            # https://docs.python.org/3/library/string.html#format-string-syntax
-            # # option does not remove the trailing zeros from the output
-            text_rates = ', '.join([format_rate_constant(i, j) for j in idx_iter_rates])
-            text_subs = ', '.join([f"{self.symbols['substitutions'][j]}={format_number_latex(subs[i, j], sig_figures)}" for j in idx_subs])
-            text_init = ', '.join([f"[\\mathrm{{{comps[j]}}}]_0={format_number_latex(init_c[i, j], sig_figures)}\\ {self.concentration_unit}" for j in idx_iter_init_c])
-            text_eps = ', '.join([f"{self.symbols['epsilons'][j]}={format_number_latex(eps[i, j], sig_figures)}" for j in idx_iter_eps])
-            text_flux = f"J={format_number_latex(J0[i], sig_figures)}\\ {self.concentration_unit}\\ s^{{-1}}" if n_J0 > 1 else ''
-            text_sw = f"s_w={format_time_latex(square_pulse_width[i], sig_figures)}" if n_square_pulse_width > 1 else ''
-            text_fwhm = f"FWHM={format_time_latex(gaussian_FWHM[i], sig_figures)}" if n_gaussian_FWHM > 1 else ''
-
-
-            # combine texts and remove empty entries (in case the the texts are empty)
-            par_names.append('; '.join(filter(None, [text_rates, text_subs, text_init, text_eps, text_flux, text_sw, text_fwhm])))
-
-        if not plot_results:
-            return
-
-        times_scaled = times.copy()
-        t_unit = 's'
-        if auto_convert_time_units:
-            s_factor, t_unit = get_time_unit(t_max)
-            times_scaled *= s_factor
-
-        # legend_loc:
-        #     Location of the legend. Default 'best'.
-        # legend_bbox_to_anchor:
-        #     Box to position the legend. Default None.
-        # stack_plots_in_rows:
-        #     Default True.
-
-        num_J = 1 if self.flux_type != 'Continuous' else 0
-        num_A = 1 if n_abs > 0 else 0  # add a plot showing total absorbance if we have absorbing compartments
-
-        def setup_axis(ax, yscale):
-            ax.set_yscale(yscale)
-            ax.tick_params(axis='both', which='major', direction='in')
-            ax.tick_params(axis='both', which='minor', direction='in')
-            ax.xaxis.set_ticks_position('both')
-            ax.yaxis.set_ticks_position('both')
-
-        # plot the results
-        if plot_separately:
-            n_rows = n - len(idxs_constant_cast) + num_J + num_A
-            figsize = (figsize[0] , figsize[1] * n_rows)
-            fig, axes = plt.subplots(n_rows if stack_plots_in_rows else 1, 1 if stack_plots_in_rows else n_rows, figsize=figsize, sharex=True)
-
-            cmap = cm.get_cmap(cmap)
-            if num_J:
-                ax = axes[0]
-                for j in range(k):
-                    ax.plot(times_scaled, J(times, J0[j], j), label='', lw=lw, color=cmap(j / J0.shape[0]))
-                ax.set_title('$J(t)$')
-                setup_axis(ax, yscale)
-
-            if num_A:
-                ax = axes[num_J]
-                for j in range(k):
-                    ax.plot(times_scaled, self.A_tensor[j], label='', lw=lw, color=cmap(j / k))
-                ax.set_title('Total asbsorbance')
-                setup_axis(ax, yscale)
-            # colormap for inner parameters
-            for i, (comp, trace, ax) in enumerate(zip(comps_cast, traces_cast, axes[num_J + num_A:])):
-                for j in range(k):
-                    label = '' if par_names[j] == '' else f'${par_names[j]}$'
-                    ax.plot(times_scaled, trace[j], label=label if i == 0 else '', lw=lw, color=cmap(j / k))
-                ax.set_ylabel(f'c / {self.concentration_unit}')
-                if i == (0 if stack_plots_in_rows else n_rows - 1) and k > 1:
-                    ax.legend(frameon=False, fontsize=legend_fontsize, labelspacing=legend_labelspacing, loc=legend_loc, bbox_to_anchor=legend_bbox_to_anchor)
-                ax.set_title(f'$\\mathrm{{{comp}}}$')
-                setup_axis(ax, yscale)
-
-            axes[-1].set_xlabel(f'Time / ${t_unit}$')
-
-        else:
-            figsize = (figsize[0] , figsize[1] * k)
-            fig, axes = plt.subplots(k if stack_plots_in_rows else 1, 1 if stack_plots_in_rows else k, figsize=figsize, sharex=True)
-
-            for i in range(k):
-                ax = axes[i] if k > 1 else axes
-
-                for j, (comp, trace) in enumerate(zip(comps_cast, traces_cast)):
-                    color = COLORS[j % len(COLORS)]
-                    ax.plot(times_scaled, trace[i], label=f'$\\mathrm{{{comp}}}$', lw=lw, color=color)
-
-                if i == k - 1:
-                    ax.set_xlabel(f'Time / ${t_unit}$')
-                ax.set_ylabel(f'c / {self.concentration_unit}')
-                title = '' if par_names[i] == '' else f'${par_names[i]}$'
-                ax.set_title(title)
-                ax.set_yscale(yscale)
-                ax.tick_params(axis='both', which='major', direction='in')
-                ax.tick_params(axis='both', which='minor', direction='in')
-                ax.xaxis.set_ticks_position('both')
-                ax.yaxis.set_ticks_position('both')
-                ax.legend(frameon=False, fontsize=legend_fontsize, labelspacing=legend_labelspacing, loc=legend_loc, bbox_to_anchor=legend_bbox_to_anchor)
-            
-        plt.tight_layout()
-        if filepath:
-            plt.savefig(filepath, dpi=dpi, transparent=transparent)
-        plt.show()
-
-    # TODO make it better
-    def plot_depenency(self, parameter_name: str, par_name_index: int = 0, compartment_name: str = 'A', 
-                      data_type: str = "last", yscale: str = "linear", plot_type: str = "scatter", figsize: tuple = (6, 4)):
-
-        assert self.C_tensor.shape[0] > 1, "No parameter is changed, no dependency can be plotted"
+        assert self.C_tensor.shape[0] > 1, "No parameter was changed, no dependency can be plotted"
 
         comps = self.get_compartments()
         idx = comps.index(compartment_name)
 
         if data_type == "last":
             points = self.C_tensor[:, idx, -1]
+        elif data_type == "first":
+            points = self.C_tensor[:, idx, 0]
         elif data_type == "integral":
             points = np.trapz(self.C_tensor[:, idx, :], x=self.times, axis=1)
         else:
             raise ValueError(f"Invalid data_type: {data_type}")
 
-        x_vars = self.last_parameter_matrices[parameter_name]
-        if x_vars.ndim == 2:
-            x_vars = x_vars[:, par_name_index]
+        par = self.last_parameter_map[parameter_name]
+        if par['length'] > 1:
+            x_vars = par['value']
+        else:
+            x_vars = par['value'] * np.ones(points.shape[0])
 
         fig, ax = plt.subplots(1, 1, figsize=figsize)
 
@@ -1393,15 +1466,16 @@ class PhotoKineticSymbolicModel:
         else:
             raise ValueError(f"Invalid plot_type: {plot_type}")
 
-
         ax.set_yscale(yscale)
         ax.tick_params(axis='both', which='major', direction='in')
         ax.tick_params(axis='both', which='minor', direction='in')
         ax.xaxis.set_ticks_position('both')
         ax.yaxis.set_ticks_position('both')
 
-        ax.set_xlabel(parameter_name)
-        ax.set_ylabel(f'$c$ / {self.concentration_unit}')
+        ax.set_xlabel(f'${par["latex_name"]}$')
+        ax.set_ylabel(f'$c_{{\\mathrm{{{compartment_name}}}}}(t)$' + f' / {self.concentration_unit}')
+
+        plt.tight_layout()
 
         plt.show()
 
@@ -1419,16 +1493,12 @@ class PhotoKineticSymbolicModel:
 
 if __name__ == '__main__':
 
-
-
-
     text_model = """
     GS -hv-> ^1S --> GS  // k_s  # absorption and decay back to ground state
     ^1S --> P            // k_p   # formation of the photoproduct from the singlet state
     # ^1S -hv-> ^1S
-    # P -hv-> P
+    P -hv-> P
     """
-
 
     # instantiate the model
     model = PhotoKineticSymbolicModel.from_text(text_model)
@@ -1436,56 +1506,43 @@ if __name__ == '__main__':
 
     model.flux_type = model.Flux_types[2]
 
-    model.pprint_equations()  # print the ODEs
+    # model.pprint_equations()  # print the ODEs
     # model.pprint_equations(True)  # print the ODEs
 
-    print(model.get_symbols_for_simulation_map())
+    model.steady_state_approx(['^1S'])
 
-    sim_map = model.get_symbols_for_simulation_map()
-    n = len(model.get_compartments())
+    # print(model.get_symbols_for_simulation_map())
 
-    init_conc_names = [key for key in list(sim_map.keys())[-n:]]
-    print(init_conc_names)
+    params = model.get_par_dict()
+    print(params)
+
+    sw = np.linspace(1, 600, 50)
+    J0 = 1e-4 / sw
+
+    params.update({
+        'c_GS_0': 1e-5,
+        'c_^1S_0': 0,
+        'c_P_0': 0,
+        'k_s': 1e9,
+        'k_p': 1e8,
+        'epsilon_GS': 1e5,
+        'epsilon_P': 1e5,
+        's_w': sw,
+        'J_0': J0,
+        'FWHM': 1e-10,
+        'l': 1,
+    })
+
+    model.simulate_model(params, t_max=1e3,  ODE_solver="Radau", t_points=1e3)
+
+    # print(model.last_parameter_map)
+
+    # model.plot_simulation_results(plot_separately=True)
+
+    model.plot_depenency('s_w', 'P', data_type="last", plot_type="scatter")
 
     # model.steady_state_approx(['^1S'])
 
     # print('\n')
 
-
-    # rate_constants = [ 1e9, 1e8]  # in the order of k_s, k_r
-
-    # initial_concentrations = [ 2e-5, 0, 0] # in the order of GS, ^1S, P
-    # eps = [ 1e5  ]  # in the order of tau_F, phi_r
-
-    # J0 = 9e-6
-    # t_max = 60
-
-    # model.simulate_model(rate_constants, initial_concentrations, epsilons=eps, t_max=t_max, J0=J0, l=1, 
-    # plot_separately=True, ODE_solver="Radau", gaussian_FWHM=5e-10, square_pulse_width=1e-9, t_points=1e3, yscale='linear')
-
-
-    # model = PhotoKineticSymbolicModel.from_text(model)
-    # # print(model.print_text_model())
-
-    # # model.simulate_model([1, 10], [0.1, 0], t_max=10, yscale='linear', scale=False)
-
-
-    # model.steady_state_approx(['^1O_2'], print_solution=False)
-    # model.simulate_model([np.linspace(1e-3, 5e-3, 6), 1/9.5e-6, 1e4, 1e9], [1e-3, 0, 0, 95, 1e-3],
-    #                     constant_compartments=['^3O_2'], t_max=2e3, yscale='linear', scale=True,
-    #                     plot_separately=False, cmap='plasma')
-
-    # text_model = """
-    # GS -hv-> ^1S --> GS  // k_s  # absorption and decay back to ground state
-    # ^1S --> P            // k_r  # formation of the photoproduct from the singlet state
-    # """
-
-
-    # # instantiate the model
-    # model = PhotoKineticSymbolicModel.from_text(str_model)
-
-    # # model = """
-    # # A + B --> C + D + E          // k_1  # absorption and singlet state decay
-    # # A^{2+} + F -->              // k_d
-    # # """
 

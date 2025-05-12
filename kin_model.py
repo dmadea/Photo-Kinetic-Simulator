@@ -1032,7 +1032,7 @@ class PhotoKineticSymbolicModel:
 
     def plot_simulation_results(self,  plot_separately: bool = True, t_unit: str = 's', 
                           yscale: str = 'linear',   figsize: tuple = (6, 3), 
-                          xscale: str = 'linear',
+                          xscale: str = 'linear', xlim: tuple = None,
                           cmap: str = 'plasma', lw: float = 2, 
                           legend_fontsize: int = 10, legend_labelspacing: float = 0,
                           legend_loc: str = 'center right', legend_bbox_to_anchor: tuple = (1.5, 0.5),
@@ -1052,6 +1052,8 @@ class PhotoKineticSymbolicModel:
             Scale of the x axis. Default 'linear'. Can be 'log', etc.
         yscale : str
             Scale of the y axis. Default 'linear'. Can be 'log', etc.
+        xlim : tuple
+            Limits of the x axis. Default None.
         plot_separately: 
             If True (default True), the plot will have n graphs in which n is number of compartments to plot. In each graph,
             the one compartment will be plotted. If there are some iterables (length k) in the input parameters, each graph
@@ -1123,13 +1125,15 @@ class PhotoKineticSymbolicModel:
         num_J = 1 if self.flux_type != 'Continuous' else 0
         num_A = 1 if n_abs > 0 and include_absorbance else 0
 
-        def setup_axis(ax, yscale, xscale):
+        def setup_axis(ax, yscale, xscale, xlim=None):
             ax.set_yscale(yscale)
             ax.set_xscale(xscale)
             ax.tick_params(axis='both', which='major', direction='in')
             ax.tick_params(axis='both', which='minor', direction='in')
             ax.xaxis.set_ticks_position('both')
             ax.yaxis.set_ticks_position('both')
+            if xlim:
+                ax.set_xlim(xlim)
 
         if plot_separately:
             n_rows = len(self.compartments_to_plot) + num_J + num_A
@@ -1143,7 +1147,7 @@ class PhotoKineticSymbolicModel:
                     ax.plot(times_scaled, self.J(self.times, j), label='', lw=lw, color=cmap(j / k))
                 ax.set_title('$J(t)$')
                 ax.set_ylabel('$J(t)$')
-                setup_axis(ax, yscale, xscale)
+                setup_axis(ax, yscale, xscale, xlim)
 
             if num_A:
                 ax = axes[num_J]
@@ -1151,7 +1155,7 @@ class PhotoKineticSymbolicModel:
                     ax.plot(times_scaled, self.A_tensor[j], label='', lw=lw, color=cmap(j / k))
                 ax.set_title('Total absorbance')
                 ax.set_ylabel('Absorbance')
-                setup_axis(ax, yscale, xscale)
+                setup_axis(ax, yscale, xscale, xlim)
 
             plots = []
 
@@ -1165,7 +1169,7 @@ class PhotoKineticSymbolicModel:
                 # if i == (0 if stack_plots_in_rows else n_rows - 1) and k > 1:
                 #     ax.legend(frameon=False, fontsize=legend_fontsize, labelspacing=legend_labelspacing, loc=legend_loc, bbox_to_anchor=legend_bbox_to_anchor)
                 ax.set_title(f'$\\mathrm{{{comp}}}$')
-                setup_axis(ax, yscale, xscale)
+                setup_axis(ax, yscale, xscale, xlim)
             if k > 1:
                 fig.legend(handles=plots, bbox_to_anchor=legend_bbox_to_anchor, 
                            fontsize=legend_fontsize, labelspacing=legend_labelspacing, loc=legend_loc)
@@ -1193,6 +1197,8 @@ class PhotoKineticSymbolicModel:
                 ax.set_title(title)
                 ax.set_yscale(yscale)
                 ax.set_xscale(xscale)
+                if xlim:
+                    ax.set_xlim(xlim)
                 ax.tick_params(axis='both', which='major', direction='in')
                 ax.tick_params(axis='both', which='minor', direction='in')
                 ax.xaxis.set_ticks_position('both')
